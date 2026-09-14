@@ -14,8 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MPU_NLANCZOS_EXPLICIT_NAMES
-#include "nlanczos.h"
+#include "lanczos.h"
 #include "utility.h"
 
 #ifndef UINT32_MAX
@@ -32,28 +31,17 @@
 #define NLA_MAX_ATTEMPTS 100U
 #define NLA_RAND_MULT 2131995753U
 
-/* These are deliberately easy to override in experimental builds.  Packing
- * pays for its conversion at about 1024 active rows and is fastest across the
- * matrix sizes SIQS commonly reaches.  By roughly 40K columns the input's
- * column layout is faster.  A round 32K crossover avoids a second packed
- * format.  On the measured SIQS workloads near this crossover, subsecond
- * linear-algebra differences are immaterial next to the sieving time; the
- * upper cutoff also keeps the representation and its kernels simple. */
-#ifndef NLA_PACK_MIN_ROWS
+/* Packing pays for its conversion at about 1024 active rows and is fastest
+ * across the matrix sizes SIQS commonly reaches.  By roughly 40K columns the
+ * input's column layout is faster.  A round 32K crossover avoids a second
+ * packed format.  On the measured SIQS workloads near this crossover,
+ * subsecond linear-algebra differences are immaterial next to the sieving
+ * time; the upper cutoff also keeps the representation and kernels simple. */
 #define NLA_PACK_MIN_ROWS 1024UL
-#endif
-#ifndef NLA_PACK_MAX_COLS
 #define NLA_PACK_MAX_COLS 32768UL
-#endif
-#ifndef NLA_POST_ROWS
 #define NLA_POST_ROWS 48U
-#endif
-#ifndef NLA_PACKED_DENSE_ROWS
 #define NLA_PACKED_DENSE_ROWS 64U
-#endif
-#ifndef NLA_DENSE_PANEL_BITS
 #define NLA_DENSE_PANEL_BITS 8U
-#endif
 #if NLA_DENSE_PANEL_BITS < 2 || NLA_DENSE_PANEL_BITS > 8
 #error "NLA_DENSE_PANEL_BITS must be between 2 and 8"
 #endif
@@ -66,7 +54,7 @@ typedef struct {
 } nla_row_info_t;
 
 typedef struct {
-  const nlanczos_col_t *cols;
+  const la_col_t *cols;
   unsigned long input_rows;
   unsigned long input_dense_rows;
   unsigned long ncols;
@@ -85,7 +73,7 @@ typedef struct {
 
 static size_t nla_array_bytes(size_t count, size_t item_size) {
   if (item_size != 0 && count > (size_t)-1 / item_size)
-    croak("nlanczos: allocation size overflow");
+    croak("lanczos: allocation size overflow");
   return count * item_size;
 }
 
@@ -98,7 +86,7 @@ static void *nla_malloc(size_t count, size_t item_size) {
   size_t bytes = nla_array_bytes(count, item_size);
   void *p = malloc(bytes != 0 ? bytes : 1);
   if (p == NULL)
-    croak("nlanczos: unable to allocate memory");
+    croak("lanczos: unable to allocate memory");
   return p;
 }
 
@@ -107,7 +95,7 @@ static void *nla_calloc(size_t count, size_t item_size) {
   (void)nla_array_bytes(count, item_size);
   p = calloc(count != 0 ? count : 1, item_size);
   if (p == NULL)
-    croak("nlanczos: unable to allocate memory");
+    croak("lanczos: unable to allocate memory");
   return p;
 }
 
@@ -135,15 +123,9 @@ static uint32_t nla_rand32(uint32_t *low, uint32_t *high) {
   return *low;
 }
 
-uint64_t nlanczos_get_null_entry(const uint64_t *nullrows,
-                                 unsigned long column,
-                                 unsigned long dependency) {
-  return nullrows[column] & NLA_BIT(dependency);
-}
-
 static int nla_compare_columns(const void *a, const void *b) {
-  const nlanczos_col_t *x = (const nlanczos_col_t *)a;
-  const nlanczos_col_t *y = (const nlanczos_col_t *)b;
+  const la_col_t *x = (const la_col_t *)a;
+  const la_col_t *y = (const la_col_t *)b;
   if (x->weight < y->weight) return -1;
   if (x->weight > y->weight) return 1;
   if (x->orig < y->orig) return -1;
@@ -154,7 +136,7 @@ static int nla_compare_columns(const void *a, const void *b) {
 typedef struct {
   unsigned long nrows;
   unsigned long ncols;
-  nlanczos_col_t *cols;
+  la_col_t *cols;
   unsigned long *counts;
   size_t *offsets;
   unsigned long *incidence;
@@ -167,7 +149,7 @@ typedef struct {
 
 static void nla_prune_column(nla_prune_t *p, unsigned long column) {
   unsigned long i;
-  nlanczos_col_t *c;
+  la_col_t *c;
   if (!p->alive[column])
     return;
   p->alive[column] = 0;
@@ -176,11 +158,11 @@ static void nla_prune_column(nla_prune_t *p, unsigned long column) {
   for (i = 0; i < c->weight; i++) {
     unsigned long row = c->data[i];
     if (p->counts[row] == 0)
-      croak("nlanczos: inconsistent matrix row count");
+      croak("lanczos: inconsistent matrix row count");
     p->counts[row]--;
     if (p->counts[row] == 1) {
       if (p->queue_tail >= p->nrows)
-        croak("nlanczos: singleton queue overflow");
+        croak("lanczos: singleton queue overflow");
       p->queue[p->queue_tail++] = row;
     }
   }
@@ -208,8 +190,8 @@ static void nla_prune_singletons(nla_prune_t *p) {
  * are intentionally left unchanged: SIQS debug checks still refer to factor-
  * base row numbers.  The solver builds its own compact row map later.
  */
-void nlanczos_reduce_matrix(unsigned long *nrows, unsigned long *ncols,
-                            nlanczos_col_t *cols) {
+void la_reduce_matrix(unsigned long *nrows, unsigned long *ncols,
+                      la_col_t *cols) {
   nla_prune_t p;
   unsigned long row, column, i;
   unsigned long live_rows;
@@ -236,14 +218,14 @@ void nlanczos_reduce_matrix(unsigned long *nrows, unsigned long *ncols,
   memset(p.alive, 1, (size_t)*ncols);
 
   for (column = 0; column < *ncols; column++) {
-    const nlanczos_col_t *c = cols + column;
+    const la_col_t *c = cols + column;
     if ((size_t)c->weight > (size_t)-1 - entries)
-      croak("nlanczos: matrix weight overflow");
+      croak("lanczos: matrix weight overflow");
     entries += (size_t)c->weight;
     for (i = 0; i < c->weight; i++) {
       row = c->data[i];
       if (row >= *nrows)
-        croak("nlanczos: matrix row is out of range");
+        croak("lanczos: matrix row is out of range");
       p.counts[row]++;
     }
   }
@@ -256,7 +238,7 @@ void nlanczos_reduce_matrix(unsigned long *nrows, unsigned long *ncols,
   if (*nrows != 0)
     memcpy(next, p.offsets, (size_t)*nrows * sizeof(*next));
   for (column = 0; column < *ncols; column++) {
-    const nlanczos_col_t *c = cols + column;
+    const la_col_t *c = cols + column;
     for (i = 0; i < c->weight; i++) {
       row = c->data[i];
       p.incidence[next[row]++] = column;
@@ -304,7 +286,7 @@ void nlanczos_reduce_matrix(unsigned long *nrows, unsigned long *ncols,
   *ncols = i;
 
   if (get_verbose_level() > 3)
-    printf("new Lanczos reduced to %lu active rows x %lu columns\n",
+    printf("Lanczos reduced to %lu active rows x %lu columns\n",
            live_rows, *ncols);
 
   free(p.alive);
@@ -315,7 +297,7 @@ void nlanczos_reduce_matrix(unsigned long *nrows, unsigned long *ncols,
 }
 
 static int nla_verify_sparse(unsigned long nrows, unsigned long ncols,
-                             const nlanczos_col_t *cols,
+                             const la_col_t *cols,
                              const uint64_t *dependencies) {
   uint64_t *parity = (uint64_t *)calloc(nrows != 0 ? (size_t)nrows : 1,
                                         sizeof(*parity));
@@ -345,10 +327,10 @@ static int nla_verify_sparse(unsigned long nrows, unsigned long ncols,
  * useful properties here: elimination can start at the pivot word, and all
  * selected dependencies can be back-substituted together in uint64_t lanes.
  */
-uint64_t *nlanczos_dense_nullspace64(unsigned long nrows,
-                                      unsigned long ncols,
-                                      const nlanczos_col_t *cols,
-                                      uint64_t *mask) {
+uint64_t *la_dense_nullspace(unsigned long nrows,
+                             unsigned long ncols,
+                             const la_col_t *cols,
+                             uint64_t *mask) {
   unsigned char *row_used = NULL;
   unsigned long *row_map = NULL, *pivot_columns = NULL;
   uint64_t *matrix = NULL, *result = NULL, *back_tables = NULL;
@@ -383,7 +365,7 @@ uint64_t *nlanczos_dense_nullspace64(unsigned long nrows,
     for (row = 0; row < cols[column].weight; row++) {
       unsigned long index = cols[column].data[row];
       if (index >= nrows)
-        croak("nlanczos dense solver: matrix row is out of range");
+        croak("lanczos: dense solver matrix row is out of range");
       row_used[index] = 1;
     }
   }
@@ -627,12 +609,12 @@ static void nla_matrix_append_mapped(nla_matrix_t *matrix,
     size_t row = (size_t)(mapped - dense_end);
     size_t position = row_cursor[row]++;
     if (position >= matrix->row_offsets[row + 1U])
-      croak("nlanczos: packed matrix count mismatch");
+      croak("lanczos: packed matrix count mismatch");
     matrix->row_columns[position] = (uint16_t)column;
   }
 }
 
-static int nla_input_dense_bit(const nlanczos_col_t *column,
+static int nla_input_dense_bit(const la_col_t *column,
                                unsigned long row) {
   const unsigned long *words = column->data + column->weight;
   return (words[row >> 5] & ((unsigned long)1 << (row & 31UL))) != 0;
@@ -642,7 +624,7 @@ static void nla_matrix_init(nla_matrix_t *matrix,
                             unsigned long nrows,
                             unsigned long dense_rows,
                             unsigned long ncols,
-                            const nlanczos_col_t *cols) {
+                            const la_col_t *cols) {
   unsigned long *counts;
   uint32_t *row_map;
   nla_row_info_t *row_info;
@@ -659,17 +641,17 @@ static void nla_matrix_init(nla_matrix_t *matrix,
   matrix->image_rows = nrows;
 
   if (dense_rows > nrows)
-    croak("nlanczos: dense row count exceeds matrix row count");
+    croak("lanczos: dense row count exceeds matrix row count");
   if (nrows > UINT32_MAX || ncols > UINT32_MAX)
-    croak("nlanczos: matrix dimensions exceed internal index range");
+    croak("lanczos: matrix dimensions exceed internal index range");
 
   counts = (unsigned long *)nla_calloc((size_t)nrows, sizeof(*counts));
   for (column = 0; column < ncols; column++) {
-    const nlanczos_col_t *c = cols + column;
+    const la_col_t *c = cols + column;
     for (i = 0; i < c->weight; i++) {
       row = c->data[i];
       if (row >= nrows)
-        croak("nlanczos: matrix row is out of range");
+        croak("lanczos: matrix row is out of range");
       counts[row]++;
     }
     for (row = 0; row < dense_rows; row++)
@@ -733,7 +715,7 @@ static void nla_matrix_init(nla_matrix_t *matrix,
     size_t count = (size_t)row_info[matrix->post_rows +
                                         matrix->packed_dense_rows + row].count;
     if (count > (size_t)-1 - offset)
-      croak("nlanczos: packed matrix weight overflow");
+      croak("lanczos: packed matrix weight overflow");
     offset += count;
     matrix->row_offsets[row + 1U] = offset;
   }
@@ -746,7 +728,7 @@ static void nla_matrix_init(nla_matrix_t *matrix,
            (size_t)matrix->sparse_rows * sizeof(*row_cursor));
 
   for (column = 0; column < ncols; column++) {
-    const nlanczos_col_t *c = cols + column;
+    const la_col_t *c = cols + column;
     for (i = 0; i < c->weight; i++)
       nla_matrix_append_mapped(matrix, row_cursor, column,
                                row_map[c->data[i]]);
@@ -757,14 +739,14 @@ static void nla_matrix_init(nla_matrix_t *matrix,
   }
   for (row = 0; row < matrix->sparse_rows; row++)
     if (row_cursor[row] != matrix->row_offsets[row + 1U])
-      croak("nlanczos: packed matrix count mismatch");
+      croak("lanczos: packed matrix count mismatch");
 
   if (get_verbose_level() > 3) {
     double mb = ((double)offset * sizeof(*matrix->row_columns) +
                  ((double)matrix->sparse_rows + 1.0) *
                      sizeof(*matrix->row_offsets) +
                  2.0 * (double)ncols * sizeof(uint64_t)) / 1048576.0;
-    printf("new Lanczos packed %lu x %lu matrix: %u post rows, "
+    printf("Lanczos packed %lu x %lu matrix: %u post rows, "
            "%u packed-dense rows, %u sparse rows and %lu entries "
            "(%.1f MB)\n",
            matrix->iteration_rows, ncols, matrix->post_rows,
@@ -949,13 +931,13 @@ static void nla_matrix_mul(const nla_matrix_t *matrix,
   const uint16_t *row_columns;
 
   if (!matrix->packed) {
-    const nlanczos_col_t *cols = matrix->cols;
+    const la_col_t *cols = matrix->cols;
     unsigned long input_rows = matrix->input_rows;
     unsigned long input_dense_rows = matrix->input_dense_rows;
     unsigned long ncols = matrix->ncols;
     memset(output, 0, (size_t)input_rows * sizeof(*output));
     for (column = 0; column < ncols; column++) {
-      const nlanczos_col_t *c = cols + column;
+      const la_col_t *c = cols + column;
       const unsigned long *data = c->data;
       unsigned long weight = c->weight;
       const unsigned long *dense = input_dense_rows != 0 ?
@@ -999,11 +981,11 @@ static void nla_matrix_mul_transpose(const nla_matrix_t *matrix,
   const uint16_t *row_columns;
 
   if (!matrix->packed) {
-    const nlanczos_col_t *cols = matrix->cols;
+    const la_col_t *cols = matrix->cols;
     unsigned long input_dense_rows = matrix->input_dense_rows;
     unsigned long ncols = matrix->ncols;
     for (column = 0; column < ncols; column++) {
-      const nlanczos_col_t *c = cols + column;
+      const la_col_t *c = cols + column;
       const unsigned long *data = c->data;
       unsigned long weight = c->weight;
       const unsigned long *dense = input_dense_rows != 0 ?
@@ -1176,10 +1158,10 @@ static unsigned int nla_combine_candidates(unsigned long ncols,
 
   if (vector_words != 0 &&
       candidate_count > (size_t)-1 / sizeof(uint64_t) / vector_words)
-    croak("nlanczos: candidate vector size overflow");
+    croak("lanczos: candidate vector size overflow");
   if (image_words != 0 &&
       candidate_count > (size_t)-1 / sizeof(uint64_t) / image_words)
-    croak("nlanczos: candidate image size overflow");
+    croak("lanczos: candidate image size overflow");
   vector_store = (uint64_t *)nla_calloc(
       (size_t)candidate_count * vector_words, sizeof(*vector_store));
   image_store = (uint64_t *)nla_calloc(
@@ -1265,7 +1247,7 @@ static int nla_verify_input_matrix(const nla_matrix_t *matrix,
   unsigned long column, row, i;
   int valid = 1;
   for (column = 0; column < matrix->ncols; column++) {
-    const nlanczos_col_t *c = matrix->cols + column;
+    const la_col_t *c = matrix->cols + column;
     uint64_t bits = dependencies[column];
     if (bits == 0)
       continue;
@@ -1368,19 +1350,8 @@ static uint64_t *nla_block_lanczos_once(const nla_matrix_t *matrix,
     }
     dimensions_solved += dim0;
 
-#if defined(NLA_DEBUG_RECURRENCE)
-    nla_inner_product(v[0], initial, temporary, matrix->ncols, table);
-    if (iteration >= 4 &&
-        memcmp(temporary, vt_v0[0], sizeof(temporary)) != 0)
-      croak("nlanczos: incremental inner product check failed");
-    if (iteration <= 3)
-      memcpy(vt_v0[0], temporary, sizeof(temporary));
-#elif defined(NLA_ALWAYS_DIRECT_VT_V0)
-    nla_inner_product(v[0], initial, vt_v0[0], matrix->ncols, table);
-#else
     if (iteration <= 3)
       nla_inner_product(v[0], initial, vt_v0[0], matrix->ncols, table);
-#endif
 
     for (i = 0; i < 64UL; i++)
       d[i] = vt_a_v[0][i] ^ (vt_a2_v[0][i] & mask0);
@@ -1402,11 +1373,7 @@ static uint64_t *nla_block_lanczos_once(const nla_matrix_t *matrix,
     for (i = 0; i < 64UL; i++)
       vt_v0_next[i] ^= e[i];
 
-#if defined(NLA_ALWAYS_COMPUTE_F)
-    if (1) {
-#else
     if (mask1 != UINT64_MAX) {
-#endif
       nla_small_multiply(vt_a_v[1], winv[1], f, table);
       for (i = 0; i < 64UL; i++)
         f[i] ^= NLA_BIT(i);
@@ -1437,12 +1404,10 @@ static uint64_t *nla_block_lanczos_once(const nla_matrix_t *matrix,
     dim1 = dim0;
     mask1 = mask0;
 
-#if !defined(NLA_DEBUG_RECURRENCE) && !defined(NLA_ALWAYS_DIRECT_VT_V0)
     if (iteration == 3) {
       free(initial);
       initial = NULL;
     }
-#endif
     if (iteration > matrix->ncols + 64UL) {
       failed = 1;
       break;
@@ -1450,7 +1415,7 @@ static uint64_t *nla_block_lanczos_once(const nla_matrix_t *matrix,
   }
 
   if (get_verbose_level() > 3)
-    printf("new Lanczos halted after %lu iterations (dimension %lu)%s\n",
+    printf("Lanczos halted after %lu iterations (dimension %lu)%s\n",
            iteration, dimensions_solved, failed ? ", retrying" : "");
 
   free(initial);
@@ -1504,19 +1469,19 @@ static uint64_t *nla_block_lanczos_once(const nla_matrix_t *matrix,
       return NULL;
     }
     if (!nla_verify_input_matrix(matrix, x))
-      croak("nlanczos: computed dependencies failed verification");
+      croak("lanczos: computed dependencies failed verification");
     *result_mask = actual_mask;
     return x;
   }
 }
 
-uint64_t *nlanczos_block_lanczos(unsigned long nrows,
-                                  unsigned long dense_rows,
-                                  unsigned long ncols,
-                                  nlanczos_col_t *cols,
-                                  uint32_t seed1,
-                                  uint32_t seed2,
-                                  uint64_t *mask) {
+uint64_t *la_block_lanczos(unsigned long nrows,
+                           unsigned long dense_rows,
+                           unsigned long ncols,
+                           la_col_t *cols,
+                           uint32_t seed1,
+                           uint32_t seed2,
+                           uint64_t *mask) {
   nla_matrix_t matrix;
   uint64_t *result = NULL;
   unsigned int attempt;
@@ -1538,7 +1503,7 @@ uint64_t *nlanczos_block_lanczos(unsigned long nrows,
     free(result);
     result = NULL;
     if (get_verbose_level() > 3)
-      printf("new linear algebra retry %u\n", attempt + 1U);
+      printf("linear algebra retry %u\n", attempt + 1U);
   }
   nla_matrix_clear(&matrix);
   return result;
