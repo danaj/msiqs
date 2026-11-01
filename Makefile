@@ -79,3 +79,7 @@ check-siqs-autotune: siqs-autotune-check
 
 clean:
 	rm -f msiqs lanczos-bench siqs-la-bench siqs-sieve-bench siqs-autotune-check pr32-iter-check
+
+.PHONY: check-embedded
+check-embedded:
+	$(PYTHON) tests/check-embedded.py

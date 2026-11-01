@@ -1,4 +1,4 @@
-# MPU-SIQS Implementation details
+# msiqs Implementation details
 
 ## Implementation notes
 
@@ -32,7 +32,7 @@ of parameter choices, sieving, relation handling, and linear algebra.
 
 ## Goals
 
-- Reliable factoring throughout the supported range.  MPU-SIQS should
+- Reliable factoring throughout the supported range.  msiqs should
   strive to split every supported composite, including unusual small
   inputs.  Targeted recovery profiles handle difficult cases without
   making ordinary inputs pay for broader default settings.
@@ -212,7 +212,7 @@ Since this is a dense solver, both memory and time growth make it
 appropriate for smaller factor bases.  We continue to use block
 Lanczos for large sparse matrices.  What came as a surprise was
 how well this system, meant to fix problems on 64-bit inputs, works
-even at larger input sizes.  MPU-SIQS currently uses BIDS when the
+even at larger input sizes.  msiqs currently uses BIDS when the
 factor base is less than 4096 primes, or about 196-bit (59 digit)
 inputs with current parameters.
 
@@ -264,7 +264,7 @@ have factors above these bounds.
 
 ## Build and API notes
 
-Run the commands in this section from the siqs/ directory.
+Run the commands in this section from the repository root.
 
 `make siqs` builds `msiqs` with pthread support when a compile/link probe
 succeeds, otherwise serial-only.  `-t N`, `--threads N`, and `-threads N`
@@ -273,7 +273,7 @@ are equivalent ways to request workers in a threaded build.
 threading.  Remove `msiqs` before rebuilding to return to
 autodetection or after changing compiler settings.
 
-The standalone build normally uses `-O3 -march=native -falign-loops=32`;
+The standalone build normally uses `-std=c99 -O3 -march=native -falign-loops=32`;
 compiler flags can be overridden with `CFLAGS`.  The 32-byte loop alignment
 avoids placement-sensitive sieve slowdowns seen on x86; retain it with custom
 flags when the compiler supports it.  The Makefile also accepts `CC`, `CPPFLAGS`,
@@ -282,7 +282,7 @@ There is a build helper using Perl, but the executable itself has nothing
 to do with Perl.
 
 ```sh
-cc -O3 -march=native -falign-loops=32 -DSTANDALONE -DPSIQS -pthread -o msiqs msiqs.c siqs.c lanczos.c pr32_iter.c ../squfof126.c -lgmp -lm
+cc -std=c99 -O3 -march=native -falign-loops=32 -DPSIQS -pthread -o msiqs msiqs.c siqs.c lanczos.c pr32_iter.c squfof126.c -lgmp -lm
 ```
 
 Remove `-DPSIQS -pthread` to disable threading.

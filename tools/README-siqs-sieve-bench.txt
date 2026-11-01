@@ -1,16 +1,16 @@
 SIQS BYTE-SIEVE BLOCK-SIZE SCREEN
 ===============================
 
-Build and run commands below assume the repository's siqs/ directory.
+Build and run commands below assume the repository root.
 
 Build only (regenerate Makefile after pulling the new target if necessary;
-Perl module tests/build do not run this tool):
+this is an optional developer tool):
   make siqs-sieve-bench
 
-Or compile without Perl/MakeMaker:
-  cc -O3 -march=native -falign-loops=32 -DSTANDALONE -DPSIQS -pthread \
+Or compile directly with a C compiler:
+  cc -std=c99 -O3 -march=native -falign-loops=32 -DPSIQS -pthread \
     -o siqs-sieve-bench tools/siqs-sieve-bench.c lanczos.c \
-    pr32_iter.c ../squfof126.c -lgmp -lm
+    pr32_iter.c squfof126.c -lgmp -lm
 
 Run on an idle machine:
   ./siqs-sieve-bench
@@ -91,5 +91,5 @@ the factoring queue or other heavy work when collecting performance results.
 Inputs must be odd, non-power composites of 100..MPU_SIQS_MAX_BITS bits without
 factor-base divisors. Setup retains polynomial scratch per worker, so large
 factor bases and very high thread counts require substantial memory. Requires
-GMP, POSIX pthreads, clock_gettime(CLOCK_MONOTONIC), and getrusage; no MPU Perl
+GMP, POSIX pthreads, clock_gettime(CLOCK_MONOTONIC), and getrusage; no host-language
 installation or external benchmarking dependencies are required.

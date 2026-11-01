@@ -1,8 +1,7 @@
 Embedding SIQS/PSIQS in a C host
 ===============================
 
-Paths and build commands below are relative to the repository's siqs/
-directory. SIQS, Lanczos, and pr32_iter sources live there; shared ptypes.h,
+Paths and build commands below are relative to the repository root. SIQS, Lanczos, and pr32_iter sources live there; shared ptypes.h,
 mont64.h, misc_ui.h, and squfof126.[ch] remain one level above.
 Keep that layout when copying sources, or adjust their relative includes.
 
@@ -10,7 +9,6 @@ This describes the current in-tree C interfaces, not a separately packaged
 library or a new initialization wrapper. Public declarations are in siqs.h;
 standalone host adapter is in siqs_dep.h. msiqs.c is the reference driver
 and adapter implementation. No prime-cache initialization is required.
-The Perl/MPU-GMP host retains its separate initialization for other services.
 
 The matrix solver is independent of the SIQS host adapter. Standalone users
 can compile lanczos.c with lanczos.h and ptypes.h; add PSIQS/pthreads and
@@ -25,7 +23,7 @@ Prime iteration and host lifetime
 
 SIQS uses the independent pr32_iter implementation: immutable base/presieve
 tables and iterator-owned segment storage. There is no shared mutable prime
-cache, startup/shutdown call, or dependency on the module's prime iterator.
+cache, startup/shutdown call, or dependency on an external prime iterator.
 Embeddings do not need to include pr32_iter.h unless using its API directly.
 
 The standalone API has per-call writable sieve/graph/solver state. Separate
@@ -44,7 +42,7 @@ oversubscribe the machine and consume the sum of their private scratch.
 Standalone host adapter
 ------------------------
 
-Compile a standalone embedding with STANDALONE, without STANDALONE_ECPP.
+Compile the C sources directly; no host-mode define is needed.
 Supply this definition with the exact siqs_dep.h prototype:
 
   int siqs_is_prob_prime(const mpz_t n);
@@ -60,11 +58,8 @@ Pollard-Brent adapter or source file is needed. A rare splitter miss drops
 that candidate relation and increments the failed-split counter; an inner
 SIQS miss reports the residual when the outer call's verbosity is enabled.
 
-The callback may execute in native worker threads. It must be reentrant and
-must not call unaudited Perl APIs/error machinery. Normal non-standalone builds
-map this name to the MPU-GMP function; STANDALONE_ECPP deliberately retains that
-full-host mapping. Those modes are not the lightweight standalone adapter mode,
-and PSIQS currently requires the standalone host.
+The callback may execute in native worker threads. It must be reentrant;
+use call-local GMP temporaries and synchronize mutable host configuration.
 
 Do not throw/unwind/longjmp out of a worker callback to attempt recovery.
 Standalone allocation/invariant errors and invalid API worker counts are fatal:
@@ -196,9 +191,9 @@ a complete factorization.
     return status;
   }
 
-Build from the siqs/ directory, supplying your adapter in my-siqs-host.c:
+Build from the repository root, supplying your adapter in my-siqs-host.c:
 
-  cc -O3 -falign-loops=32 -DSTANDALONE -I. -I.. -o my-factor my-factor.c my-siqs-host.c siqs.c lanczos.c pr32_iter.c ../squfof126.c -lgmp -lm
+  cc -std=c99 -O3 -falign-loops=32 -I. -o my-factor my-factor.c my-siqs-host.c siqs.c lanczos.c pr32_iter.c squfof126.c -lgmp -lm
   ./my-factor 22095311209999409685885162322219
 
 For parallel support, add -DPSIQS -pthread to that command. Both public entry
@@ -278,7 +273,7 @@ The persistent worker suite exercises repeated public 1/2/4-thread calls,
 two simultaneous callers with independent pools, and result ownership, without
 prime-cache initialization. It also checks reduced/failed pool
 creation and cleanup. It is a regression check, not exhaustive proof of every
-schedule or a claim that all other MPU-GMP routines are reentrant.
+schedule or a claim about unrelated host routines.
 
 This guide documents the existing contract. It adds no global reference
 counter, hidden per-call initialization, new embedding wrapper, or cleanup/

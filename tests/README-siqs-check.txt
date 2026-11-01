@@ -354,5 +354,5 @@ Do not combine ThreadSanitizer with --sanitize (ASan). Normal worker jobs do
 not acquire the allocation-injection lock, to avoid hiding races. These are
 regression fixtures, not an exhaustive proof of every possible schedule.
 The embedding contract is documented in siqs.h and
-siqs/tools/README-siqs-embedding.txt. Prime iteration uses immutable tables and
+tools/README-siqs-embedding.txt. Prime iteration uses immutable tables and
 per-iterator segment storage; concurrent callers need no global setup.

@@ -5,12 +5,10 @@ columns whose XOR is zero. They work independently of SIQS and return
 dependencies, not integer factors. A factoring host supplies its own relation
 matrix and uses the dependencies in its square-root step.
 
-Keep `lanczos.c` and `lanczos.h` in a `siqs/` subdirectory, with the shared
-`ptypes.h` in its parent directory. For parallel Lanczos, also copy
-`planczos_inc.c` alongside `lanczos.c`. Preserve that layout, or adjust the
-relative includes when copying sources. Build examples below run inside `siqs/`.
-Compile with `STANDALONE`; no GMP, Perl,
-SIQS adapters, prime caches, startup, or shutdown calls are needed. Keep the
+Copy `lanczos.c`, `lanczos.h`, and `ptypes.h` into one directory.
+For parallel Lanczos, also copy `planczos_inc.c` alongside `lanczos.c`.
+Build examples below run from that directory. No host-mode define, GMP,
+prime cache, startup, or shutdown call is needed. Keep the
 copyright notices and consult the repository's `LICENSE` for redistribution
 terms.
 
@@ -220,7 +218,7 @@ int main(int argc, char **argv) {
 Build from the repository root, or adapt the paths to your copied files:
 
 ```sh
-cc -O3 -DSTANDALONE -I. -o my-nullspace my-nullspace.c lanczos.c
+cc -std=c99 -O3 -I. -o my-nullspace my-nullspace.c lanczos.c
 ./my-nullspace dense
 ./my-nullspace lanczos
 ./my-nullspace wide
@@ -229,7 +227,7 @@ cc -O3 -DSTANDALONE -I. -o my-nullspace my-nullspace.c lanczos.c
 For parallel support:
 
 ```sh
-cc -O3 -DSTANDALONE -DPSIQS -pthread -I. \
+cc -std=c99 -O3 -DPSIQS -pthread -I. \
   -o my-nullspace my-nullspace.c lanczos.c
 ./my-nullspace threaded
 ```

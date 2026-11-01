@@ -1,9 +1,9 @@
 #ifndef MPU_TINYSIQS128_H
 #define MPU_TINYSIQS128_H
 
-#include "factor128.h"
+#include "ptypes.h"
 
-#if HAVE_FACTOR128
+#if HAVE_UINT128
 /* Factor using SIQS (or shortcuts for small inputs).
  *
  * 0 and 1 return themselves.

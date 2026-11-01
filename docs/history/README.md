@@ -18,3 +18,6 @@ an explicit public-domain dedication in YAFU, and earlier work by Jason
 Papadopoulos and others. Existing mathematical and implementation credits
 remain in the source. MIT licensing here does not change the licenses of
 the original Perl projects or of linked GMP installations.
+
+The original module license texts are retained alongside these notes for
+historical context. They do not replace the current root MIT license.

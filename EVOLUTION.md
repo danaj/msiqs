@@ -1,5 +1,8 @@
 # Evolution of quadratic sieving in MPU-GMP
 
+This study covers the development before SIQS became the independent
+msiqs project. Historical program names and measured versions are retained.
+
 ![Evolution of MPU-GMP quadratic-sieve implementations](graphs/siqs-evolution.svg)
 
 [Open the full-size evolution graph](graphs/siqs-evolution.svg)

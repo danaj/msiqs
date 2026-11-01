@@ -1,11 +1,10 @@
 # SIQS relation journal, version 1
 
-The standalone SIQS front end can save and resume its relation collection.
-The format is implemented in `siqs_journal_inc.c`. Journalling is optional
-and disabled automatically in Perl-module builds. This format currently
+The msiqs front end can save and resume its relation collection.
+The format is implemented in `siqs_journal_inc.c`. Journal support is always compiled; creating a journal is optional. This format currently
 supports serial and pthreads restart, with one coordinator owning the file.
 
-MPU-SIQS is still under rapid development so the journal format could
+msiqs is still under rapid development so the journal format could
 see changes in the near future.
 
 
@@ -168,8 +167,8 @@ measurable first interval; later batches still provide rates.
 
 Clock reads occur once at the start of resumed work and when sealing frames.
 POSIX uses `CLOCK_REALTIME` and `CLOCK_MONOTONIC`; Windows uses
-`GetSystemTimeAsFileTime` and `QueryPerformanceCounter`.  `SIQS_NO_JOURNAL`
-excludes these clocks and headers.
+`GetSystemTimeAsFileTime` and `QueryPerformanceCounter`. The separate
+embedded edition contains no journal code or clock instrumentation.
 
 An unsigned GMP magnitude is encoded as `u32(byte_length)` followed by that
 many **big-endian magnitude bytes**.  Zero has length zero; nonzero values have

@@ -24,7 +24,7 @@ used small front end programs that skipped all pretests and directly called
 their SIQS implementations.  YAFU 3.1.9 on x86 compiles with no changes,
 but needed two minor changes to compile on macOS.
 
-- [MPU](https://github.com/danaj/Math-Prime-Util-GMP/tree/master/siqs) is
+- [MPU](https://github.com/danaj/msiqs) is
   this project: a new C/GMP implementation of SIQS.  It uses no assembly
   and is very fast on both x86 and ARM64, and has good parallel scaling.
   We are using the standalone SIQS tool which doesn't utilize the general
@@ -279,3 +279,7 @@ default QS settings on specific machines and inputs.  YAFU is a much
 broader factoring toolkit, including NFS, with over 15 years of use
 across varied hardware, inputs, and workflows behind it. That experience
 represents strengths a timing graph cannot capture.
+
+Historical MPU-SIQS labels and source commit identifiers are retained in
+these measurements. They identify the builds tested before the standalone
+project was extracted; they are not measurements of a later msiqs build.

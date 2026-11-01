@@ -2,7 +2,7 @@
 
   Fixed-width self-initializing quadratic sieve for inputs through 128 bits.
 
-  This is the no-GMP specialization of Math::Prime::Util::GMP's SIQS.  It
+  This is the native fixed-width specialization of msiqs.  It
   uses the same normalized polynomial
 
       q(x) = ((D*x + B)^2 - kN) / D,       D = d*A, d in {1,2},
@@ -26,7 +26,7 @@
 #include "ptypes.h"
 #include "tinysiqs128.h"
 
-#if HAVE_FACTOR128
+#if HAVE_UINT128
 
 #ifndef UINT8_MAX
 # define UINT8_MAX 255U
@@ -210,12 +210,7 @@ typedef struct {
   uint32_t next;
 } ts_hit_t;
 
-typedef struct {
-  uint128_t n;
-  uint128_t ninv;
-  uint128_t r2;
-  uint128_t one;
-} ts_mont_t;
+#include "util_128.c"
 
 typedef struct {
   unsigned long *data;
@@ -307,52 +302,6 @@ static void *ts_realloc_array(void *old, size_t count, size_t size) {
   return p;
 }
 
-static uint32_t ts_bits128(uint128_t n) {
-  uint64_t hi = (uint64_t)(n >> 64);
-  uint64_t lo = (uint64_t)n;
-  uint32_t bits = 0;
-  uint64_t v = hi ? hi : lo;
-  if (v == 0)
-    return 0;
-#if defined(__GNUC__) || defined(__clang__)
-  bits = 64U - (uint32_t)__builtin_clzll(v);
-#else
-  while (v != 0) { bits++; v >>= 1; }
-#endif
-  return hi ? bits + 64U : bits;
-}
-
-static double ts_log128(uint128_t n) {
-  uint64_t hi = (uint64_t)(n >> 64);
-  uint64_t lo = (uint64_t)n;
-  if (hi == 0)
-    return log((double)lo);
-  return log((double)hi + ldexp((double)lo, -64)) + 64.0 * M_LN2;
-}
-
-/* Avoid compiler runtime helpers for uint128_t-to-double conversion. */
-static double ts_get_d(uint128_t n) {
-  double d = (double)(uint32_t)(n >> 96);
-  d = d * 4294967296.0 + (double)(uint32_t)(n >> 64);
-  d = d * 4294967296.0 + (double)(uint32_t)(n >> 32);
-  return d * 4294967296.0 + (double)(uint32_t)n;
-}
-
-static uint128_t ts_abs_i128(int128_t value) {
-  uint128_t u = (uint128_t)value;
-  return value < 0 ? (uint128_t)0 - u : u;
-}
-
-static uint32_t ts_signed_mod_u32(int128_t value, uint32_t p) {
-  uint32_t r = (uint32_t)(ts_abs_i128(value) % p);
-  return value < 0 && r != 0 ? p - r : r;
-}
-
-static uint128_t ts_signed_mod_n(int128_t value, uint128_t n) {
-  uint128_t r = ts_abs_i128(value) % n;
-  return value < 0 && r != 0 ? n - r : r;
-}
-
 static uint64_t ts_mix64(uint64_t x) {
   x ^= x >> 30;
   x *= UINT64_C(0xbf58476d1ce4e5b9);
@@ -373,218 +322,6 @@ static uint64_t ts_rand64(ts_rng_t *rng) {
 
 static uint32_t ts_rand_range(ts_rng_t *rng, uint32_t limit) {
   return limit == 0 ? 0 : (uint32_t)(ts_rand64(rng) % limit);
-}
-
-static uint32_t ts_ctz32(uint32_t n) {
-  if (n == 0)
-    croak("tinysiqs128: ctz of zero");
-#if defined(__GNUC__) || defined(__clang__)
-  return (uint32_t)__builtin_ctz(n);
-#else
-  uint32_t count = 0;
-  while (!(n & 1U)) { n >>= 1; count++; }
-  return count;
-#endif
-}
-
-static unsigned int ts_ctz64(uint64_t n) {
-  if (n == 0)
-    croak("tinysiqs128: ctz of zero");
-#if defined(__GNUC__) || defined(__clang__)
-  return (unsigned int)__builtin_ctzll(n);
-#else
-  unsigned int count = 0;
-  while (!(n & 1U)) { n >>= 1; count++; }
-  return count;
-#endif
-}
-
-static uint64_t ts_isqrt128(uint128_t n) {
-  uint128_t r, next;
-  uint32_t bits;
-  if (n == 0)
-    return 0;
-  bits = ts_bits128(n);
-  r = (uint128_t)1 << ((bits + 1U) / 2U);
-  for (;;) {
-    next = (r + n / r) >> 1;
-    if (next >= r)
-      break;
-    r = next;
-  }
-  while (r > n / r)
-    r--;
-  return (uint64_t)r;
-}
-
-static uint128_t ts_gcd128(uint128_t a, uint128_t b) {
-  while (b != 0) {
-    uint128_t t = a % b;
-    a = b;
-    b = t;
-  }
-  return a;
-}
-
-static uint128_t ts_addmod128(uint128_t a, uint128_t b, uint128_t n) {
-  uint128_t nb = n - b;
-  return a >= nb ? a - nb : a + b;
-}
-
-static uint128_t ts_submod128(uint128_t a, uint128_t b, uint128_t n) {
-  return a >= b ? a - b : n - (b - a);
-}
-
-static uint128_t ts_pow2mod128(unsigned int exponent, uint128_t n) {
-  uint128_t r = 1;
-  while (exponent-- != 0)
-    r = ts_addmod128(r, r, n);
-  return r;
-}
-
-/* Low 128 bits of a full product. */
-static uint128_t ts_lo128(uint128_t a, uint128_t b) {
-  uint64_t a0 = (uint64_t)a, a1 = (uint64_t)(a >> 64);
-  uint64_t b0 = (uint64_t)b, b1 = (uint64_t)(b >> 64);
-  uint128_t lo = (uint128_t)a0 * b0;
-  lo += ((uint128_t)a0 * b1) << 64;
-  lo += ((uint128_t)a1 * b0) << 64;
-  return lo;
-}
-
-static void ts_mul256(uint128_t a, uint128_t b,
-                      uint128_t *lo_out, uint128_t *hi_out) {
-  uint64_t a0 = (uint64_t)a, a1 = (uint64_t)(a >> 64);
-  uint64_t b0 = (uint64_t)b, b1 = (uint64_t)(b >> 64);
-  uint128_t p00 = (uint128_t)a0 * b0;
-  uint128_t p01 = (uint128_t)a0 * b1;
-  uint128_t p10 = (uint128_t)a1 * b0;
-  uint128_t p11 = (uint128_t)a1 * b1;
-  uint128_t mid = p01 + p10;
-  int middle_carry = mid < p01;
-  uint128_t lo = p00 + (mid << 64);
-  int low_carry = lo < p00;
-  *lo_out = lo;
-  *hi_out = p11 + (mid >> 64)
-          + ((uint128_t)middle_carry << 64) + (uint128_t)low_carry;
-}
-
-static uint128_t ts_mulhi128(uint128_t a, uint128_t b) {
-  uint128_t lo, hi;
-  ts_mul256(a, b, &lo, &hi);
-  (void)lo;
-  return hi;
-}
-
-static uint128_t ts_mont_mul(uint128_t a, uint128_t b,
-                             const ts_mont_t *ctx) {
-  uint128_t lo, hi, m, mn_hi, t;
-  int carry, overflow;
-  ts_mul256(a, b, &lo, &hi);
-  m = ts_lo128(lo, ctx->ninv);
-  carry = lo != 0;
-  mn_hi = ts_mulhi128(m, ctx->n);
-  t = hi + mn_hi;
-  overflow = t < hi;
-  {
-    uint128_t old = t;
-    t += (uint128_t)carry;
-    overflow += t < old;
-  }
-  return overflow || t >= ctx->n ? t - ctx->n : t;
-}
-
-static uint128_t ts_mont_enter(uint128_t a, const ts_mont_t *ctx) {
-  return ts_mont_mul(a % ctx->n, ctx->r2, ctx);
-}
-
-static uint128_t ts_mont_exit(uint128_t a, const ts_mont_t *ctx) {
-  return ts_mont_mul(a, 1, ctx);
-}
-
-static void ts_mont_setup(ts_mont_t *ctx, uint128_t n) {
-  uint128_t x;
-  if (n <= 1 || !(n & 1U))
-    croak("tinysiqs128: invalid Montgomery modulus");
-  ctx->n = n;
-  x = (3 * n) ^ 2;
-  x *= 2 - n * x;
-  x *= 2 - n * x;
-  x *= 2 - n * x;
-  x *= 2 - n * x;
-  x *= 2 - n * x;
-  ctx->ninv = (uint128_t)0 - x;
-  ctx->r2 = ts_pow2mod128(256, n);
-  ctx->one = ts_mont_enter(1, ctx);
-}
-
-static uint128_t ts_mont_pow_u32(uint128_t a, uint32_t exponent,
-                                 const ts_mont_t *ctx) {
-  uint128_t r = ctx->one;
-  while (exponent != 0) {
-    if (exponent & 1U)
-      r = ts_mont_mul(r, a, ctx);
-    exponent >>= 1;
-    if (exponent != 0)
-      a = ts_mont_mul(a, a, ctx);
-  }
-  return r;
-}
-
-/* Coefficients are kept modulo n in Montgomery form. */
-static uint128_t ts_modinv128(uint128_t a, const ts_mont_t *ctx) {
-  uint128_t r0 = ctx->n, r1 = a % ctx->n;
-  uint128_t t0 = 0, t1 = ctx->one;
-  if (r1 == 0)
-    return 0;
-  while (r1 != 0) {
-    uint128_t q = r0 / r1;
-    uint128_t r = r0 - q * r1;
-    uint128_t qm = ts_mont_enter(q, ctx);
-    uint128_t t = ts_submod128(t0, ts_mont_mul(qm, t1, ctx), ctx->n);
-    r0 = r1;
-    r1 = r;
-    t0 = t1;
-    t1 = t;
-  }
-  return r0 == 1 ? ts_mont_exit(t0, ctx) : 0;
-}
-
-/* Compare base^exponent with limit without overflowing. */
-static int ts_power_compare(uint128_t base, uint32_t exponent,
-                            uint128_t limit) {
-  uint128_t product = 1;
-  uint32_t i;
-  for (i = 0; i < exponent; i++) {
-    if (base != 0 && product > limit / base)
-      return 1;
-    product *= base;
-  }
-  return product < limit ? -1 : product > limit ? 1 : 0;
-}
-
-static uint128_t ts_exact_root(uint128_t n, uint32_t exponent) {
-  uint32_t bits = ts_bits128(n);
-  uint32_t root_bits = (bits + exponent - 1U) / exponent;
-  uint128_t lo = 2, hi;
-  if (root_bits >= 128)
-    hi = n;
-  else
-    hi = (uint128_t)1 << root_bits;
-  while (lo <= hi) {
-    uint128_t mid = lo + ((hi - lo) >> 1);
-    int cmp = ts_power_compare(mid, exponent, n);
-    if (cmp == 0)
-      return mid;
-    if (cmp < 0)
-      lo = mid + 1;
-    else {
-      if (mid == 0)
-        break;
-      hi = mid - 1;
-    }
-  }
-  return 0;
 }
 
 static uint128_t MAYBE_UNUSED ts_trial_factor32(uint32_t n) {
@@ -3125,10 +2862,6 @@ static void ts_touch_factor(ts_ctx_t *ctx, uint32_t row,
   ctx->factor_counts[row] = old + exponent;
 }
 
-static uint128_t ts_mont_neg(uint128_t value, const ts_mont_t *mont) {
-  return value == 0 ? 0 : mont->n - value;
-}
-
 static int ts_test_dependencies(ts_ctx_t *ctx,
                                 const ts_la_col_t *columns,
                                 unsigned long ncols,
@@ -3458,7 +3191,7 @@ static uint128_t _tinysiqs128(uint128_t n, int doprimality) {
     return root;
 
   /* Only do primality if asked, and skip trial pretests. */
-  if (doprimality && is_bpsw128(n))
+  if (doprimality && u128_is_bpsw128(n))
     return n;
 
   /* PERF: below 2^49, SQUFOF measured faster than SIQS. */
@@ -3499,4 +3232,4 @@ uint128_t tinysiqs128_composite(uint128_t n) {
   return _tinysiqs128(n, 0);
 }
 
-#endif /* HAVE_FACTOR128 */
+#endif /* HAVE_UINT128 */

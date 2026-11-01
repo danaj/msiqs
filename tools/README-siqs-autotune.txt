@@ -1,7 +1,7 @@
 OPTIONAL SIQS HARDWARE SCREEN
 ============================
 
-Build and run commands below assume the repository's siqs/ directory.
+Build and run commands below assume the repository root.
 
 Build the shared helper, then run the advisory tool:
 
@@ -22,7 +22,7 @@ The siqs-tuned-8 alias prints its recursive make command as a usage example.
 Compilation stays in the Makefile / existing standalone builder. siqs-tuned is
 a phony override: it always measures and rebuilds msiqs, even if the executable
 already exists. Failed measurements prevent compilation. Ordinary make siqs
-does not run tuning. The Perl module is not rebuilt by these targets.
+does not run tuning.
 CC/CPPFLAGS/CFLAGS/LDFLAGS/LDLIBS retain their normal meanings; EXTRA_FLAGS adds
 manual options to standalone builds. No non-core Perl modules are used.
 Flags are not saved: a later ordinary rebuild uses the ordinary build options.
@@ -149,5 +149,5 @@ VALIDATION
 
 Repository-only aggregate/alias/pool/protocol tests: make check-siqs-autotune.
 Wrapper-only tests without compilation: perl tests/siqs-autotune.t.
-Requires the existing GMP/POSIX-pthreads helper, independent of the Perl module's
+Requires the existing GMP/POSIX-pthreads helper, independent of any host project
 normal build/test workflow.

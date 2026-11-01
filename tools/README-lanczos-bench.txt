@@ -1,13 +1,13 @@
 BLOCK-LANCZOS SCALING BENCHMARK
 ==============================
 
-Build and run commands below assume the repository's siqs/ directory.
+Build and run commands below assume the repository root.
 
 Build only (does not run a large benchmark):
   make lanczos-bench
 
-Or compile without Perl/MakeMaker:
-  cc -O3 -march=native -falign-loops=32 -DSTANDALONE -DPSIQS -pthread \
+Or compile directly with a C compiler:
+  cc -std=c99 -O3 -march=native -falign-loops=32 -DPSIQS -pthread \
     -o lanczos-bench tools/lanczos-bench.c -lm
 
 The benchmark and solver have no GMP or SIQS host-adapter dependency.

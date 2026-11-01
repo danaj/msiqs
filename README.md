@@ -1,12 +1,10 @@
-# SIQS in Math::Prime::Util::GMP
+# msiqs
 
-MPU-SIQS is a portable C implementation of the Self-Initializing Quadratic
-Sieve for integer factoring, using GMP for large-integer arithmetic.  It is
-the default quadratic sieve in Math::Prime::Util::GMP 0.55.
-MPU-SIQS was written in late 2026 by Dana Jacobsen, using OpenAI Codex
-to write parts of the code, tests, and tools.
-
-This README focuses on building and using the standalone SIQS tool.
+msiqs is a portable C implementation of the Self-Initializing Quadratic
+Sieve for integer factoring, using GMP for large-integer arithmetic.
+It began in Math::Prime::Util::GMP and is now developed independently.
+Dana Jacobsen wrote it in late 2026, using OpenAI Codex to write parts
+of the code, tests, and tools.
 
 Both SIQS and the block Lanczos solver can be embedded in another C
 project in addition to their use in the included standalone program.
@@ -21,10 +19,9 @@ the standalone tool, which can be compiled with a single CC line.
 
 ### Standalone program
 
-From the repository root (no module configuration or installation needed):
+From the repository root:
 
 ```sh
-cd siqs
 make
 ./msiqs 22095311209999409685885162322219
 ```
@@ -56,10 +53,13 @@ the file format. Journalling is off unless requested.
 
 ### Embedding in C
 
+The independent [embedded package](embedded/README.md) supplies a frozen,
+serial GMP-based SIQS and a GMP-free TinySIQS128. Updates are manual.
+
 The [SIQS embedding guide](tools/README-siqs-embedding.txt) gives build
 instructions and host examples.
 The [matrix solvers](tools/README-lanczos-embedding.md) can also be
-embedded independently, without GMP or Perl, and are not tied to this
+embedded independently, without GMP, and are not tied to this
 SIQS implementation.
 
 ## SIQS Performance at a glance
@@ -99,14 +99,14 @@ More comparisons can be seen in the [benchmarks document](BENCHMARKS.md)
 
 Parameters cover inputs through 512 bits. Complete factoring runs have
 been verified through 430 bits, while the larger range has had component
-testing.  The design expectation of MPU-SIQS is to factor all composite
+testing.  The design expectation of msiqs is to factor all composite
 inputs within its size range.  Composites with multiple factors are
 usually fully factored, but this is not guaranteed.
 
-MPU-SIQS implements the Self-Initializing Quadratic Sieve.  It does not
+msiqs implements the Self-Initializing Quadratic Sieve.  It does not
 implement ECM or NFS, which can be more practical choices for some inputs.
 While it works well from 1 to at least 430 bits, typically SIQS is one part
-of a generic factoring package, as in MPU's factor routine, or in
+of a generic factoring package, as in a general-purpose factoring routine, or in
 [YAFU](http://sourceforge.net/projects/yafu/).
 
 ## Further reading
@@ -115,3 +115,12 @@ of a generic factoring package, as in MPU's factor routine, or in
 - [evolution and history](EVOLUTION.md)
 - [benchmark comparisons and methodology](BENCHMARKS.md)
 - [benchmark graphs](graphs/).
+
+## Checks and license
+
+`make check` runs the SIQS checks. Additional targets are
+`make check-embedded`, `make check-pr32-iter`, `make check-siqs-autotune`,
+and `make check-siqs-journal`. Developer checks use core Perl and Python 3;
+
+Current sources are [MIT licensed](LICENSE). See [source history](docs/history/README.md)
+for the extraction, original commit maps, and historical notices.
