@@ -2,7 +2,7 @@
 #define MPU_SIQS_H
 
 #include <gmp.h>
-#include "../ptypes.h"
+#include "ptypes.h"
 
 /* The Perl build always excludes journalling.  Keep the public interface and
  * harmless internal stubs, so callers need no build-mode conditionals.

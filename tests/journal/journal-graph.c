@@ -1,9 +1,9 @@
 /* Compare the rebuilt relation graph's completed relations with live collection.
  * A cached final partition alone must not hide a faulty relation replay. */
 #define main journal_frontend_main
-#include "../../../../siqs/mpu-siqs.c"
+#include "../../msiqs.c"
 #undef main
-#include "../../../../siqs/siqs.c"
+#include "../../siqs.c"
 
 int main(int argc, char **argv) {
   siqs_journal_t *journal;

@@ -9,7 +9,7 @@ import tempfile
 import sys
 sys.dont_write_bytecode=True
 from _support import ROOT, BUILD, RESULTS
-SOURCES=['mpu-siqs.c','siqs.c','lanczos.c','pr32_iter.c','../squfof126.c']
+SOURCES=['msiqs.c','siqs.c','lanczos.c','pr32_iter.c','../squfof126.c']
 N=((1<<89)-1)*((1<<107)-1)
 FACTORS=[(1<<89)-1,(1<<107)-1]
 

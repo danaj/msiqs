@@ -148,6 +148,6 @@ VALIDATION
 ----------
 
 Repository-only aggregate/alias/pool/protocol tests: make check-siqs-autotune.
-Wrapper-only tests without compilation: perl xt/dev/siqs/siqs-autotune.t.
+Wrapper-only tests without compilation: perl tests/siqs-autotune.t.
 Requires the existing GMP/POSIX-pthreads helper, independent of the Perl module's
 normal build/test workflow.

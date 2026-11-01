@@ -13,7 +13,7 @@ FIXTURES = Path(__file__).resolve().parent
 EXE = RESULTS/'msiqs'
 os.environ['SIQS_JOURNAL_TEST_DIR'] = str(RESULTS)
 os.environ['SIQS_JOURNAL_TEST_EXECUTABLE'] = str(EXE)
-SOURCES = ['mpu-siqs.c','siqs.c','lanczos.c','pr32_iter.c','../squfof126.c']
+SOURCES = ['msiqs.c','siqs.c','lanczos.c','pr32_iter.c','../squfof126.c']
 
 
 def step(name, command, cwd=ROOT):

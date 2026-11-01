@@ -20,7 +20,7 @@
 #if !defined(STANDALONE) || !defined(PSIQS)
 #error "Build siqs-sieve-bench with -DSTANDALONE -DPSIQS -pthread"
 #endif
-#include "../../ptypes.h"
+#include "../ptypes.h"
 /* The production allocator is the sole source of balancing/activation math.
  * These are runtime inputs only in this tool. Its parser enforces the size
  * bounds normally enforced by siqs.c's compile-time check (identifiers in
@@ -35,7 +35,7 @@ static uint32_t bench_block_maximum, bench_block_minimum;
 #define SIQS_SIEVE_BLOCK_SIZE bench_block_maximum
 #define SIQS_SIEVE_BLOCK_MIN_LENGTH bench_block_minimum
 #define main siqs_sieve_bench_unused_driver_main
-#include "../mpu-siqs.c"
+#include "../msiqs.c"
 #undef main
 #include "../siqs.c"
 

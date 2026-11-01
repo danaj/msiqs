@@ -31,8 +31,8 @@ be installed or built. Use --keep to retain the binary.
 
 Direct build without Perl or a generated Makefile, from the repository root:
 
-  cc -O3 -DSTANDALONE -o /tmp/siqs-check xt/dev/siqs/siqs-check.c \
-    siqs/pr32_iter.c squfof126.c -lgmp -lm
+  cc -O3 -DSTANDALONE -o /tmp/siqs-check tests/siqs-check.c \
+    pr32_iter.c squfof126.c -lgmp -lm
   /tmp/siqs-check --suite sieve
   /tmp/siqs-check --extended --verbose
 
@@ -76,18 +76,18 @@ the residual only when verbosity is enabled. No rho fallback is required.
 --verbose reports individual polynomial/matrix fixtures. New suites can
 be registered without creating separate executables or a large framework.
 
-  perl xt/dev/siqs/siqs-check.pl --list
-  perl xt/dev/siqs/siqs-check.pl --suite sieve --extended
-  perl xt/dev/siqs/siqs-check.pl --suite scores --sanitize --debug
-  perl xt/dev/siqs/siqs-check.pl --suite scores --score-bits 5 --sanitize --debug
-  perl xt/dev/siqs/siqs-check.pl --suite relations
-  perl xt/dev/siqs/siqs-check.pl --suite matrix --extended
-  perl xt/dev/siqs/siqs-check.pl --suite bids --sanitize --debug
+  perl tests/siqs-check.pl --list
+  perl tests/siqs-check.pl --suite sieve --extended
+  perl tests/siqs-check.pl --suite scores --sanitize --debug
+  perl tests/siqs-check.pl --suite scores --score-bits 5 --sanitize --debug
+  perl tests/siqs-check.pl --suite relations
+  perl tests/siqs-check.pl --suite matrix --extended
+  perl tests/siqs-check.pl --suite bids --sanitize --debug
   make -C siqs check-siqs SIQS_CHECK_ARGS='--suite workers'
-  perl xt/dev/siqs/siqs-check.pl --block-size 32768
-  perl xt/dev/siqs/siqs-check.pl --block-size 0
-  perl xt/dev/siqs/siqs-check.pl --sanitize
-  perl xt/dev/siqs/siqs-check.pl --sanitize --debug
+  perl tests/siqs-check.pl --block-size 32768
+  perl tests/siqs-check.pl --block-size 0
+  perl tests/siqs-check.pl --sanitize
+  perl tests/siqs-check.pl --sanitize --debug
 
 Block size is a production compile-time setting, so testing another maximum
 requires another build. A single build exercises both blocked and unblocked
@@ -160,7 +160,7 @@ bounded-miss SAR handoffs retain their one-time/quiet diagnostic checks.
 
 Full upper-policy setup is opt-in:
 
-  perl xt/dev/siqs/siqs-check.pl --suite setup --extended --verbose
+  perl tests/siqs-check.pl --suite setup --extended --verbose
 
 Use the actual production policies at 400/401, 430/431, 463, 496 and 512 bits.
 Deterministic composites have known large factors, so factor-base construction

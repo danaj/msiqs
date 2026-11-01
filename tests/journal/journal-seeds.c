@@ -2,9 +2,9 @@
  * the caller now supplies different states. No relation checkpoint can hide
  * a failure to restore these states before the first A is selected. */
 #define main journal_frontend_main
-#include "../../../../siqs/mpu-siqs.c"
+#include "../../msiqs.c"
 #undef main
-#include "../../../../siqs/siqs.c"
+#include "../../siqs.c"
 
 int main(int argc, char **argv) {
   const uint64_t la = UINT64_C(0x1a6b50f924d38ce7);

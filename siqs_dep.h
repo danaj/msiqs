@@ -2,10 +2,10 @@
 #define MPU_SIQS_DEP_H
 
 #include <gmp.h>
-#include "../ptypes.h"
+#include "ptypes.h"
 
 /* Host adapters for SIQS.  A standalone C embedding supplies this definition
- * (mpu-siqs.c contains the reference implementations).
+ * (msiqs.c contains the reference implementations).
  * Prime iteration is internal and requires no host-managed cache lifetime.
  * For PSIQS/concurrent C calls, use reentrant adapters, caller-local
  * temporaries, and immutable or synchronized configuration; don't enter

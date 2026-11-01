@@ -1,5 +1,5 @@
 /* Independent reference and allocation-failure checks; compile this file
- * alone. Example: cc -O2 -o /tmp/pr32-check xt/dev/siqs/pr32-iter-check.c
+ * alone. Example: cc -O2 -o /tmp/pr32-check tests/pr32-iter-check.c
  * Add -DPR32_ITER_SEGMENT_BYTES=1 to stress short sieve tails.
  */
 #include <assert.h>
@@ -29,7 +29,7 @@ static void checked_free(void *p) {
 #define malloc checked_malloc
 #define realloc checked_realloc
 #define free checked_free
-#include "../../../siqs/pr32_iter.c"
+#include "../pr32_iter.c"
 #undef malloc
 #undef realloc
 #undef free

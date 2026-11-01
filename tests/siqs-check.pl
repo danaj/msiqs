@@ -41,7 +41,7 @@ my $binary = File::Spec->catfile($temporary, 'siqs-check');
 my @command = (shellwords($cc), shellwords($cflags));
 push @command, '-O1', '-g', '-fsanitize=address,undefined', '-fno-sanitize-recover=all'
   if $sanitize;
-push @command, '-DSTANDALONE', '-UPSIQS', "-I$root", "-I$root/siqs";
+push @command, '-DSTANDALONE', '-UPSIQS', "-I$root", "-I$root";
 # Match build-siqs.pl: probe by compiling/linking, never by running it.
 unless (defined $threaded) {
   my $probe = File::Spec->catfile($temporary, 'pthread-probe');
@@ -52,11 +52,11 @@ unless (defined $threaded) {
     open STDOUT, '>', $log or die "cannot open $log: $!\n";
     open STDERR, '>&', \*STDOUT or die "cannot redirect probe errors: $!\n";
     $threaded = system(@command, '-pthread', '-o', $probe,
-                      File::Spec->catfile($root, 'siqs', 'tools', 'pthread-probe.c')) == 0;
+                      File::Spec->catfile($root, 'tools', 'pthread-probe.c')) == 0;
   }
 }
 if ($score_bits != 8) {
-  open my $input, '<', File::Spec->catfile($root, 'siqs', 'siqs.c') or die $!;
+  open my $input, '<', File::Spec->catfile($root, 'siqs.c') or die $!;
   my $source = do { local $/; <$input> };
   close $input or die $!;
   $source =~ s/^#define SIQS_SIEVE_SCORE_BITS 8U$/#define SIQS_SIEVE_SCORE_BITS ${score_bits}U/m
@@ -76,7 +76,7 @@ push @command, '-DSIQS_DEBUG' if $debug;
 push @command, '-DPSIQS', '-pthread' if $threaded;
 push @command, "-DSIQS_SIEVE_BLOCK_SIZE=$block" if defined $block;
 push @command, '-o', $binary, map {File::Spec->catfile($root, $_)}
-  qw(xt/dev/siqs/siqs-check.c siqs/pr32_iter.c squfof126.c);
+  qw(tests/siqs-check.c pr32_iter.c squfof126.c);
 push @command, shellwords($ldflags);
 print "Building standalone SIQS checker ", ($threaded ? 'with pthreads' : 'serial-only'),
       ($sanitize ? ' (ASan/UBSan)' : ''), "\n";
@@ -96,7 +96,7 @@ exit($status >> 8);
 sub usage {
   my ($status) = @_;
   print <<'USAGE';
-usage: perl xt/dev/siqs/siqs-check.pl [options]
+usage: perl tests/siqs-check.pl [options]
   --suite NAME          Run policies, sieve, scores, setup, relations, matrix, bids, workers, cofactors, or all.
   --score-bits N        Scratch 5/6/7-bit score model (--suite scores only).
   --extended           Broader fixtures and more polynomials, not full factors.

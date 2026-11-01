@@ -282,7 +282,7 @@ There is a build helper using Perl, but the executable itself has nothing
 to do with Perl.
 
 ```sh
-cc -O3 -march=native -falign-loops=32 -DSTANDALONE -DPSIQS -pthread -o msiqs mpu-siqs.c siqs.c lanczos.c pr32_iter.c ../squfof126.c -lgmp -lm
+cc -O3 -march=native -falign-loops=32 -DSTANDALONE -DPSIQS -pthread -o msiqs msiqs.c siqs.c lanczos.c pr32_iter.c ../squfof126.c -lgmp -lm
 ```
 
 Remove `-DPSIQS -pthread` to disable threading.

@@ -1,9 +1,9 @@
 /* Exercise completed unsuccessful/recovery attempts without a long failure.
  * This is a private integration test, never linked into the standalone tool. */
 #define main journal_frontend_main
-#include "../../../../siqs/mpu-siqs.c"
+#include "../../msiqs.c"
 #undef main
-#include "../../../../siqs/siqs.c"
+#include "../../siqs.c"
 
 static int check_codecs(void) {
   static const struct {

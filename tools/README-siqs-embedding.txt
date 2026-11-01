@@ -8,7 +8,7 @@ Keep that layout when copying sources, or adjust their relative includes.
 
 This describes the current in-tree C interfaces, not a separately packaged
 library or a new initialization wrapper. Public declarations are in siqs.h;
-standalone host adapter is in siqs_dep.h. mpu-siqs.c is the reference driver
+standalone host adapter is in siqs_dep.h. msiqs.c is the reference driver
 and adapter implementation. No prime-cache initialization is required.
 The Perl/MPU-GMP host retains its separate initialization for other services.
 
