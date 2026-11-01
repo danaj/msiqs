@@ -1,9 +1,9 @@
-# Standalone SIQS; independent of Perl's configured compiler and linker.
-# Run here, or use: make -C siqs
+# msiqs: native C factoring with optional pthreads.
+# Run from the repository root.
 CC ?= cc
 CPPFLAGS ?=
 # 32-byte loop alignment avoids placement-sensitive GCC/x86 sieve slowdowns.
-CFLAGS ?= -O3 -march=native -falign-loops=32
+CFLAGS ?= -std=c99 -O3 -march=native -falign-loops=32
 LDFLAGS ?=
 LDLIBS ?= -lgmp -lm
 PERL ?= perl
@@ -15,7 +15,7 @@ SIQS_TUNE_ARGS ?=
 SOURCES = msiqs.c siqs.c lanczos.c pr32_iter.c squfof126.c
 HEADERS = siqs.h siqs_dep.h lanczos.h siqs_choose_inc.c siqs_sieve_kernel_inc.c siqs_journal_inc.c \
 	psiqs_inc.c planczos_inc.c ptypes.h mont64.h pr32_iter.h \
-	squfof126.h misc_ui.h
+	squfof126.h
 BUILD = $(PERL) tools/build-siqs.pl --cc "$(CC)" \
 	--cppflags "$(CPPFLAGS)" --cflags "$(CFLAGS) $(EXTRA_FLAGS)" \
 	--ldflags "$(LDFLAGS)" --ldlibs "$(LDLIBS)"
@@ -54,7 +54,7 @@ siqs-la-bench: tools/siqs-la-bench.c $(BENCH_DEPS) $(BUILD_DEPS) Makefile
 siqs-sieve-bench: tools/siqs-sieve-bench.c tools/siqs-autotune.inc.c $(BENCH_DEPS) $(BUILD_DEPS) Makefile
 	@$(BUILD) --output $@ tools/siqs-sieve-bench.c lanczos.c pr32_iter.c squfof126.c
 
-# Repository-only checks; not dependencies of the Perl module's test target.
+# Developer correctness checks.
 # To force serial checks: make check-siqs SIQS_CHECK_ARGS=--serial
 check: check-siqs
 test-siqs: check-siqs

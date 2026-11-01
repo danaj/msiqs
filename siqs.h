@@ -4,13 +4,6 @@
 #include <gmp.h>
 #include "ptypes.h"
 
-/* The Perl build always excludes journalling.  Keep the public interface and
- * harmless internal stubs, so callers need no build-mode conditionals.
- * The standalone troubleshooting switch is near the top of siqs.c.
- * Why bother?  Disabling skips compiling timer and file i/o code. */
-#if !defined(STANDALONE) && !defined(SIQS_NO_JOURNAL)
-# define SIQS_NO_JOURNAL
-#endif
 
 /* Lowest post-trial cofactor size accepted by the SIQS stage. */
 #define MPU_SIQS_MIN_BITS   1U
@@ -73,8 +66,8 @@ extern void gmp_siqs_journal_close(siqs_journal_t *journal);
 #ifdef PSIQS
 /* Same partition and trial_start contract as gmp_siqs.  Release the result
  * with gmp_siqs_free.  nthreads must be in [1, PSIQS_MAX_THREADS]; one worker
- * uses the ordinary serial path.  Requires a STANDALONE/PSIQS pthread build;
- * native workers must not call unaudited Perl host adapters. Concurrent outer
+ * uses the ordinary serial path.  Requires a PSIQS pthread build;
+ * host adapters must be reentrant. Concurrent outer
  * callers each create their own pool; nthreads is not a process-wide cap. */
 extern mpz_t *gmp_psiqs(const mpz_t n, uint32_t *nfactors,
                        uint32_t trial_start, int verbose, uint32_t nthreads);

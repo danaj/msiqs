@@ -8,7 +8,7 @@
 #define LA_DENSE_CROSSOVER_COLS 1536UL
 
 typedef struct {
-  /* 32-bit indices cover SIQS through its 431-bit developer hard cap. */
+  /* 32-bit indices cover the configured factor-base and matrix limits. */
   uint32_t *data;
   uint32_t weight;
   uint32_t orig;

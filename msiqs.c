@@ -1,10 +1,10 @@
 /*============================================================================
 
-  Standalone driver and host dependencies for MPU-SIQS.
+  Standalone driver and host dependencies for msiqs.
 
   Direct build from the siqs/ directory:
 
-    cc -O3 -falign-loops=32 -DSTANDALONE -o msiqs msiqs.c siqs.c lanczos.c pr32_iter.c ../squfof126.c -lgmp -lm
+    cc -std=c99 -O3 -falign-loops=32 -o msiqs msiqs.c siqs.c lanczos.c pr32_iter.c ../squfof126.c -lgmp -lm
 
   Add -march=native when building a binary for the local machine only.
   Loop alignment avoids placement-sensitive sieve slowdowns on x86.
@@ -45,13 +45,13 @@ static void print_usage(FILE *stream, const char *program) {
   fprintf(stream,
 #ifdef PSIQS
           "usage: %s [-v|--verbose] [-threads N] [--] [INTEGER ...]\n"
-          "Factor positive decimal integers with MPU-PSIQS.\n"
+          "Factor positive decimal integers with msiqs.\n"
           "Use -threads N to select 1-%u workers (default 1); "
           "one worker uses serial SIQS.\n"
           "-t and --threads are aliases for -threads.\n"
 #else
           "usage: %s [-v|--verbose] [--] [INTEGER ...]\n"
-          "Factor positive decimal integers with MPU-SIQS.\n"
+          "Factor positive decimal integers with msiqs.\n"
 #endif
           "Repeat -v for increasingly detailed progress output.\n"
           "Without --journal or INTEGER arguments, read integers from stdin.\n"

@@ -1,54 +1,5 @@
 /* Coordinator-owned relation journal. Included after the graph/chooser code.
  * See JOURNAL.md. Nothing here is called by sieve workers. */
-#ifdef SIQS_NO_JOURNAL
-
-/* Keep the front end and factor loop independent of build-mode conditionals.
- * In particular, close(NULL) is an ordinary no-op in a journal-free build. */
-siqs_journal_t *gmp_siqs_journal_open(const char *path, mpz_srcptr n) {
-  (void)path; (void)n;
-  croak("SIQS journal support disabled in this build");
-  return NULL;
-}
-void gmp_siqs_journal_input(const siqs_journal_t *j, mpz_t n) {
-  (void)j; (void)n;
-  croak("SIQS journal support disabled in this build");
-}
-void gmp_siqs_journal_close(siqs_journal_t *j) {
-  if (j != NULL) croak("SIQS journal support disabled in this build");
-}
-void gmp_siqs_journal_finish(siqs_journal_t *j, mpz_t *values,
-                            size_t count, int complete) {
-  (void)values; (void)count; (void)complete;
-  if (j != NULL) croak("SIQS journal support disabled in this build");
-}
-static void siqs_journal_relation(siqs_ctx_t *ctx, const siqs_raw_relation_t *r) {
-  (void)ctx; (void)r;
-}
-static void siqs_journal_family(siqs_ctx_t *ctx, const siqs_poly_t *poly) {
-  (void)ctx; (void)poly;
-}
-static void sj_flush(siqs_ctx_t *ctx) { (void)ctx; }
-static void sj_maybe_flush(siqs_ctx_t *ctx) { (void)ctx; }
-static void siqs_journal_full(siqs_ctx_t *ctx, uint32_t length) {
-  (void)ctx; (void)length;
-}
-static int sj_attach(siqs_ctx_t *ctx, siqs_poly_t *poly, uint64_t *families,
-                     uint64_t *polynomials) {
-  (void)ctx; (void)poly; (void)families; (void)polynomials;
-  return 0;
-}
-static void sj_begin_attempt(siqs_ctx_t *ctx) { (void)ctx; }
-static void sj_end_attempt(siqs_ctx_t *ctx) { (void)ctx; }
-static mpz_t *sj_cached_call(siqs_journal_t *j, const mpz_t n, uint32_t *count) {
-  (void)j; (void)n; (void)count;
-  return NULL;
-}
-static void sj_finish_call(siqs_journal_t *j, const mpz_t n, mpz_t *values,
-                            uint32_t count) {
-  (void)j; (void)n; (void)values; (void)count;
-}
-
-#else
 
 #include <errno.h>
 #include <fcntl.h>
@@ -822,4 +773,3 @@ void gmp_siqs_journal_finish(siqs_journal_t *j, mpz_t *values,
 #undef SJ_PARAMETER_U
 #undef SJ_PARAMETER_D
 #undef SJ_COUNTERS
-#endif /* !SIQS_NO_JOURNAL */

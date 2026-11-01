@@ -1,0 +1,10 @@
+/msiqs
+/lanczos-bench
+/siqs-la-bench
+/siqs-sieve-bench
+/siqs-autotune-check
+/pr32-iter-check
+*.o
+__pycache__/
+.DS_Store
+*.journal

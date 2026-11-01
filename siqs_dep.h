@@ -9,20 +9,13 @@
  * Prime iteration is internal and requires no host-managed cache lifetime.
  * For PSIQS/concurrent C calls, use reentrant adapters, caller-local
  * temporaries, and immutable or synchronized configuration; don't enter
- * unaudited Perl error/API machinery.
+ * non-reentrant host callbacks.
  * See tools/README-siqs-embedding.txt for the complete host contract.
- * The ECPP standalone build retains the full MPU-GMP host functions. */
+ * No host-managed prime-cache lifetime is required. */
 
-#if defined(STANDALONE) && !defined(STANDALONE_ECPP)
 
 /* Nonzero means prime/probably prime; do not modify n. */
 extern int siqs_is_prob_prime(const mpz_t n);
 
-#else  /* Below means we're in the Perl module or ECPP */
-
-#include "../primality.h"
-#define siqs_is_prob_prime(n)        _GMP_is_prob_prime(n)
-
-#endif
 
 #endif

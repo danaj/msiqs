@@ -1,7 +1,7 @@
 /* Standalone SIQS sanity/regression checker, not part of Perl's test suite.
  *
  * Direct build from the repository root (GMP required, Perl not required):
- *   cc -O3 -DSTANDALONE -o /tmp/siqs-check tests/siqs-check.c \
+ *   cc -O3 -o /tmp/siqs-check tests/siqs-check.c \
  *     pr32_iter.c squfof126.c -lgmp -lm
  *   /tmp/siqs-check --suite sieve
  *
@@ -414,7 +414,7 @@ static void make_semiprime(mpz_t n, gmp_randstate_t random, uint32_t bits) {
 
 static void check_trial_survivor(const mpz_t n) {
   PR32_ITER(iter);
-  UV p;
+  uint64_t p;
   uint32_t bits = (uint32_t)mpz_sizeinbase(n, 2);
   uint32_t limit = bits <= 40 ? 200U : bits >= 1000 ? 5000U : 5U * bits;
   pr32_iter_seek(&iter, 1);

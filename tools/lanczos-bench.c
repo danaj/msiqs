@@ -4,7 +4,7 @@
  * Including the solver exposes its actual pool size and unchanged recurrence;
  * no instrumentation or benchmark hooks are needed in production sources.
  *
- * cc -O3 -march=native -falign-loops=32 -DSTANDALONE -DPSIQS -pthread \
+ * cc -std=c99 -O3 -march=native -falign-loops=32 -DPSIQS -pthread \
  *    -o lanczos-bench tools/lanczos-bench.c -lm
  * Copyright (c) 2026 Dana Jacobsen. See LICENSE for redistribution terms.
  */
@@ -17,11 +17,11 @@
 #include <time.h>
 #include <unistd.h>
 
-#if !defined(STANDALONE) || !defined(PSIQS)
-#error "Build lanczos-bench with -DSTANDALONE -DPSIQS -pthread"
+#if !defined(PSIQS)
+#error "Build lanczos-bench with -DPSIQS -pthread"
 #endif
 /* The benchmark may explore beyond production's provisional 32-thread cap.
- * This does not change the solver cap in siqs/psiqs builds. */
+ * This does not change the solver cap in the SIQS and parallel builds. */
 #ifndef NLA_MAX_THREADS
 #define NLA_MAX_THREADS 256U
 #endif

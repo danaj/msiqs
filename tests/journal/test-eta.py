@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 
 sys.dont_write_bytecode=True
-tool=Path(sys.argv[1]) if len(sys.argv)>1 else Path(__file__).resolve().parents[4]/'siqs/tools/journal-info.py'
+tool=Path(sys.argv[1]) if len(sys.argv)>1 else Path(__file__).resolve().parents[2]/'tools/journal-info.py'
 spec=importlib.util.spec_from_file_location('journal_info',tool)
 info=importlib.util.module_from_spec(spec);spec.loader.exec_module(info)
 

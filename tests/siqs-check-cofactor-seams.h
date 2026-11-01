@@ -5,7 +5,7 @@
 static int cofactor_miss_squfof;
 static int cofactor_miss_siqs, cofactor_trace;
 static unsigned int cofactor_squfof_calls, cofactor_prime_calls;
-static int check_cofactor_squfof(const mpz_t n, mpz_t f, UV rounds) {
+static int check_cofactor_squfof(const mpz_t n, mpz_t f, uint64_t rounds) {
   if (cofactor_trace) cofactor_squfof_calls++;
   return cofactor_miss_squfof ? 0 : squfof126(n, f, rounds);
 }

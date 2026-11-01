@@ -1,8 +1,7 @@
 /* Fixed-width modular arithmetic for an odd modulus n > 1.
  *
  * Adapted from the tecm64 helpers in Math::Prime::Util's factor.c.
- * Uses the shared types/inlining in ptypes.h; no Perl/GMP dependency when
- * compiled with STANDALONE. With unsigned 128-bit arithmetic, values are in
+ * Uses the shared types/inlining in ptypes.h; no GMP dependency. With unsigned 128-bit arithmetic, values are in
  * Montgomery form (R = 2^64); otherwise the same interface uses ordinary
  * residues and portable double-and-add multiplication. Set
  * MONT64_HAVE_UINT128=0 to exercise that fallback on any compiler.

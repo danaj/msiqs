@@ -13,7 +13,7 @@ FIXTURES = Path(__file__).resolve().parent
 EXE = RESULTS/'msiqs'
 os.environ['SIQS_JOURNAL_TEST_DIR'] = str(RESULTS)
 os.environ['SIQS_JOURNAL_TEST_EXECUTABLE'] = str(EXE)
-SOURCES = ['msiqs.c','siqs.c','lanczos.c','pr32_iter.c','../squfof126.c']
+SOURCES = ['msiqs.c','siqs.c','lanczos.c','pr32_iter.c','squfof126.c']
 
 
 def step(name, command, cwd=ROOT):
@@ -34,7 +34,7 @@ step('build-serial',['perl','tools/build-siqs.pl','--serial','--output',str(RESU
                      '--cflags','-O2 -falign-loops=32']+SOURCES,BUILD)
 step('journal-tests',[sys.executable,'-u',str(FIXTURES/'test-journal.py'),
                       '--executable',str(EXE),'--serial-executable',str(RESULTS/'msiqs-serial')])
-step('build-seeds',['cc','-O1','-DSTANDALONE','-o',str(RESULTS/'journal-seeds'),
+step('build-seeds',['cc','-O1','-o',str(RESULTS/'journal-seeds'),
                     str(FIXTURES/'journal-seeds.c'),str(BUILD/'lanczos.c'),
                     str(BUILD/'pr32_iter.c'),str(ROOT/'squfof126.c'),'-lgmp','-lm'])
 path=RESULTS/'seeds.journal'
@@ -47,7 +47,7 @@ assert (RESULTS/'seed-record.log').read_bytes()==(RESULTS/'seed-replay.log').rea
 step('seed-info',[sys.executable,str(BUILD/'tools/journal-info.py'),'--json',str(path)])
 assert json.loads((RESULTS/'seed-info.log').read_text())['contexts'][0]['initial_rng']==dict(
     lanczos=0x1a6b50f924d38ce7,cofactor=0x8e721c06a9b5d43f,polynomial=0xc3f9821d4076ab5e)
-step('build-attempts',['cc','-O1','-DSTANDALONE','-o',str(RESULTS/'journal-attempts'),
+step('build-attempts',['cc','-O1','-o',str(RESULTS/'journal-attempts'),
                        str(FIXTURES/'journal-attempts.c'),str(BUILD/'lanczos.c'),
                        str(BUILD/'pr32_iter.c'),str(ROOT/'squfof126.c'),'-lgmp','-lm'])
 step('event-headers',[sys.executable,'-u',str(FIXTURES/'test-event-headers.py'),str(RESULTS/'journal-attempts')])
@@ -61,7 +61,7 @@ data=path.read_bytes()
 step('attempt-replay',[str(RESULTS/'journal-attempts'),str(path)])
 assert path.read_bytes()==data
 step('attempt-info',[sys.executable,str(BUILD/'tools/journal-info.py'),'--json',str(path)])
-step('build-graph',['cc','-O2','-DSTANDALONE','-DPSIQS','-pthread',
+step('build-graph',['cc','-O2','-DPSIQS','-pthread',
                     '-o',str(RESULTS/'journal-graph'),str(FIXTURES/'journal-graph.c'),
                     str(BUILD/'lanczos.c'),str(BUILD/'pr32_iter.c'),
                     str(ROOT/'squfof126.c'),'-lgmp','-lm'])
@@ -93,6 +93,5 @@ step('wide-header-replay',[str(RESULTS/'journal-attempts'),str(path),'--wide'])
 assert path.read_bytes()==data
 step('wide-header-info',[sys.executable,str(BUILD/'tools/journal-info.py'),'--json',str(path)])
 step('existing-check-siqs',['make','check-siqs'],BUILD)
-step('no-journal',[sys.executable,'-u',str(FIXTURES/'test-no-journal.py')])
 step('journal-info',[sys.executable,'-u',str(FIXTURES/'test-journal-info.py')])
 print('All journal, recovery and existing SIQS checks passed.',flush=True)

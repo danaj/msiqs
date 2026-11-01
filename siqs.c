@@ -2,7 +2,7 @@
 
   Self-initializing quadratic sieve
 
-  This is an independent implementation for Math::Prime::Util::GMP.  Its
+  This is an independent implementation for msiqs.  Its
   polynomial, sieve, relation graph, and matrix interfaces are private.
   A-family selection lives in siqs_choose_inc.c and sieve kernels in
   siqs_sieve_kernel_inc.c. Linear algebra is supplied by lanczos.c.
@@ -32,15 +32,10 @@
 
 ============================================================================*/
 
-/* Uncomment to omit standalone journal I/O and clocks on problem platforms.
- * Keep this before the feature-test macros and system headers. */
-/* #define SIQS_NO_JOURNAL */
-
-#if ((defined(STANDALONE) && !defined(SIQS_NO_JOURNAL)) || defined(SIQS_TIMING)) && \
-    !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
 # define _POSIX_C_SOURCE 200809L
 #endif
-#if defined(STANDALONE) && !defined(SIQS_NO_JOURNAL) && !defined(_FILE_OFFSET_BITS)
+#ifndef _FILE_OFFSET_BITS
 # define _FILE_OFFSET_BITS 64
 #endif
 
@@ -984,9 +979,7 @@ typedef struct {
   siqs_bids_stop_t bids_stop;
   siqs_journal_t *journal;
   uint64_t *journal_poly_count;
-#ifndef SIQS_NO_JOURNAL
   uint64_t journal_cycles[8];
-#endif
 } siqs_ctx_t;
 
 static void siqs_journal_relation(siqs_ctx_t *, const siqs_raw_relation_t *);
@@ -1141,7 +1134,7 @@ static void siqs_raw_arena_clear(siqs_raw_arena_t *arena) {
 }
 
 /* Exact floor cube root, adapted from misc_ui.h's icbrt.  Fixed-width
- * arithmetic avoids both UV-width differences and a dependency on cbrt(). */
+ * arithmetic avoids both uint64_t-width differences and a dependency on cbrt(). */
 static uint64_t siqs_icbrt_u64(uint64_t n) {
   uint64_t b, root = 0;
   int shift = 63;
@@ -4410,7 +4403,7 @@ static int siqs_resolve_cofactor(siqs_ctx_t *ctx, const mpz_t rest,
   /* SQUFOF wins below 56 bits; otherwise go directly to SIQS. */
   if (!success && (!can_siqs || nbits < 56U)) {
     mpz_t factor;
-    UV rounds = nbits <= 40 ? 20000
+    uint64_t rounds = nbits <= 40 ? 20000
               : nbits <= 44 ? 50000
               : nbits <= 48 ? 100000
               : nbits <= 52 ? 200000 : 500000;
@@ -6227,12 +6220,8 @@ static mpz_t *siqs_factor(const mpz_t n, uint32_t *nfactors,
 
 mpz_t *gmp_siqs_journal_factor(siqs_journal_t *journal, const mpz_t n,
     uint32_t *nfactors, uint32_t trial_start, int verbose, uint32_t nthreads) {
-#ifdef SIQS_NO_JOURNAL
-  if (journal != NULL) croak("SIQS journal support disabled in this build");
-#else
   if (journal != NULL && (mpz_sgn(n) <= 0 || !mpz_divisible_p(journal->original, n)))
     croak("SIQS journal: requested cofactor does not divide original input");
-#endif
   if (nthreads == 0 || nthreads > PSIQS_MAX_THREADS)
     croak("SIQS journal: invalid worker count");
 #ifndef PSIQS

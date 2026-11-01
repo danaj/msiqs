@@ -1,5 +1,5 @@
 /*
- * GF(2) linear-algebra solvers for Math::Prime::Util::GMP.
+ * GF(2) linear-algebra solvers for msiqs.
  *
  * The block-Lanczos algorithm is due to Peter Montgomery.
  * During development, this file briefly contained Jason Papadopoulos's

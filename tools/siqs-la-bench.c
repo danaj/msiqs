@@ -1,7 +1,7 @@
 /* Real reduced SIQS matrices: dense versus serial block Lanczos.
  * See README-siqs-la-bench.txt. No production timing/capture hooks.
- * cc -O3 -march=native -falign-loops=32 -DSTANDALONE -UPSIQS -o siqs-la-bench \
- *   tools/siqs-la-bench.c siqs.c pr32_iter.c ../squfof126.c -lgmp -lm
+ * cc -std=c99 -O3 -march=native -falign-loops=32 -UPSIQS -o siqs-la-bench \
+ *   tools/siqs-la-bench.c siqs.c pr32_iter.c squfof126.c -lgmp -lm
  * Copyright (c) 2026 Dana Jacobsen. See LICENSE for redistribution terms.
  */
 #ifndef _POSIX_C_SOURCE
@@ -11,8 +11,8 @@
 #include <inttypes.h>
 #include <time.h>
 
-#if !defined(STANDALONE) || defined(PSIQS)
-#error "Build siqs-la-bench with -DSTANDALONE -UPSIQS (serial)"
+#if defined(PSIQS)
+#error "Build siqs-la-bench with -UPSIQS (serial)"
 #endif
 #define la_reduce_matrix bench_original_reduce
 #include "../lanczos.c"
@@ -60,10 +60,10 @@ static double bench_median(double *values) {
 static la_col_t *bench_copy(unsigned long ncols, const la_col_t *columns) {
   la_col_t *copy;
   unsigned long c;
-  New(0, copy, (size_t)ncols, la_col_t);
+  copy = (la_col_t *)nla_malloc((size_t)ncols, sizeof(*copy));
   for (c = 0; c < ncols; c++) {
     copy[c] = columns[c];
-    New(0, copy[c].data, (size_t)columns[c].weight, uint32_t);
+    copy[c].data = (uint32_t *)nla_malloc((size_t)columns[c].weight, sizeof(uint32_t));
     if (columns[c].weight != 0)
       memcpy(copy[c].data, columns[c].data, (size_t)columns[c].weight * sizeof(uint32_t));
   }
@@ -83,7 +83,7 @@ static void bench_verify(unsigned long nrows, unsigned long ncols,
   unsigned long c, row;
   if (deps == NULL || mask == 0)
     croak("siqs-la-bench: solver returned no dependencies\n");
-  Newz(0, parity, nrows != 0 ? (size_t)nrows : 1U, uint64_t);
+  parity = (uint64_t *)nla_calloc(nrows != 0 ? (size_t)nrows : 1U, sizeof(*parity));
   for (c = 0; c < ncols; c++) {
     uint32_t i;
     if ((deps[c] & ~mask) != 0)

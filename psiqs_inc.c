@@ -14,9 +14,6 @@
 
 /* Native worker calls into Perl's error/primality adapters need a separate
  * audit.  For now, enable this implementation only in the standalone host. */
-#ifndef STANDALONE
-# error "PSIQS currently requires the standalone host"
-#endif
 
 #include <pthread.h>
 

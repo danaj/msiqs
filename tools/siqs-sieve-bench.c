@@ -3,9 +3,9 @@
  * See README-siqs-sieve-bench.txt. Includes the production private interfaces,
  * as siqs-check does; no production hooks, policies or binaries are changed.
  *
- * cc -O3 -march=native -falign-loops=32 -DSTANDALONE -DPSIQS -pthread \
+ * cc -std=c99 -O3 -march=native -falign-loops=32 -DPSIQS -pthread \
  *   -o siqs-sieve-bench tools/siqs-sieve-bench.c lanczos.c \
- *   pr32_iter.c ../squfof126.c -lgmp -lm
+ *   pr32_iter.c squfof126.c -lgmp -lm
  * Copyright (c) 2026 Dana Jacobsen. See LICENSE for redistribution terms.
  */
 #ifndef _POSIX_C_SOURCE
@@ -17,8 +17,8 @@
 #include <time.h>
 #include <unistd.h>
 
-#if !defined(STANDALONE) || !defined(PSIQS)
-#error "Build siqs-sieve-bench with -DSTANDALONE -DPSIQS -pthread"
+#if !defined(PSIQS)
+#error "Build siqs-sieve-bench with -DPSIQS -pthread"
 #endif
 #include "../ptypes.h"
 /* The production allocator is the sole source of balancing/activation math.

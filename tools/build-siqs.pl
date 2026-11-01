@@ -11,7 +11,7 @@ use Text::ParseWords qw(shellwords);
 # Called only when make needs a build. Probe by linking, never by executing,
 # so this also works with cross compilers. No build-mode stamp is retained.
 my ($cc, $cppflags, $cflags, $ldflags, $ldlibs, $output, $serial) =
-   ('cc', '', '-O3 -falign-loops=32', '', '-lgmp -lm', 'msiqs', 0);
+   ('cc', '', '-std=c99 -O3 -falign-loops=32', '', '-lgmp -lm', 'msiqs', 0);
 Getopt::Long::Configure(qw(no_auto_abbrev no_ignore_case));
 GetOptions('cc=s' => \$cc, 'cppflags=s' => \$cppflags, 'cflags=s' => \$cflags,
            'ldflags=s' => \$ldflags, 'ldlibs=s' => \$ldlibs,
@@ -41,7 +41,7 @@ unless ($serial) {
 
 print "Building $output ", ($threaded ? 'with pthreads' : 'serial-only'), "\n";
 $| = 1;
-my @command = (@compiler, @flags, '-DSTANDALONE');
+my @command = (@compiler, @flags);
 push @command, $threaded ? ('-DPSIQS', '-pthread') : ('-UPSIQS');
 push @command, @link_flags, '-o', $output, @ARGV, shellwords($ldlibs);
 print join(' ', map {shell_quote($_)} @command), "\n";

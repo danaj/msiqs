@@ -36,12 +36,12 @@ die "reduced score width requires --suite scores\n"
 die "block size must be zero or 4096..1048576 bytes\n"
   if defined($block) && $block != 0 && ($block < 4096 || $block > 1048576);
 my $temporary = tempdir('siqs-check-XXXXXX', TMPDIR => 1, CLEANUP => !$keep);
-my $root = File::Spec->rel2abs(File::Spec->catdir($Bin, '..', '..', '..'));
+my $root = File::Spec->rel2abs(File::Spec->catdir($Bin, '..'));
 my $binary = File::Spec->catfile($temporary, 'siqs-check');
 my @command = (shellwords($cc), shellwords($cflags));
 push @command, '-O1', '-g', '-fsanitize=address,undefined', '-fno-sanitize-recover=all'
   if $sanitize;
-push @command, '-DSTANDALONE', '-UPSIQS', "-I$root", "-I$root";
+push @command, '-UPSIQS', "-I$root";
 # Match build-siqs.pl: probe by compiling/linking, never by running it.
 unless (defined $threaded) {
   my $probe = File::Spec->catfile($temporary, 'pthread-probe');
