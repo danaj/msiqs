@@ -5,21 +5,21 @@ Build and run commands below assume the repository root.
 
 Build the shared helper, then run the advisory tool:
 
-  make siqs-sieve-bench
+  make bench-sieve
   tools/siqs-autotune.pl
   tools/siqs-autotune.pl --flags --threads 8 --output tune-8.tsv
 
 Or measure and rebuild msiqs in one step:
 
-  make siqs-tuned
-  make siqs-tuned-8
-  make siqs-tuned SIQS_TUNE_ARGS='--threads 8'
+  make tuned
+  make tuned8
+  make tuned TUNE_ARGS='--threads 8'
 
 The eight-thread forms screen for eight threads; they do not change msiqs's
 default thread count. Still pass -threads 8 when running that executable.
-The siqs-tuned-8 alias prints its recursive make command as a usage example.
+The tuned8 alias prints its recursive make command as a usage example.
 
-Compilation stays in the Makefile / existing standalone builder. siqs-tuned is
+Compilation stays in the Makefile / existing standalone builder. tuned is
 a phony override: it always measures and rebuilds msiqs, even if the executable
 already exists. Failed measurements prevent compilation. Ordinary make siqs
 does not run tuning.
@@ -36,14 +36,14 @@ OUTPUT MODES
 
 --flags prints only the final compiler flags on stdout, with concise preparation,
 stage lists, decision and serial-speed information on stderr. It is the mode
-used by make siqs-tuned: progress stays visible during command substitution.
+used by make tuned: progress stays visible during command substitution.
 --onlyflags (alias --flags-only) also prints just flags on stdout, but suppresses
 normal progress completely. Without either switch, stdout contains full
 measurements, aggregate results and compiler flags. Errors still go to stderr.
 The two flags-only modes are mutually exclusive.
 
 For the manual make form, remove an existing msiqs first: make does not detect
-variable changes. siqs-tuned always forces the rebuild. In shell scripts, check
+variable changes. tuned always forces the rebuild. In shell scripts, check
 the autotune command's exit status before invoking make; inline command
 substitution alone does not propagate that failure.
 
@@ -102,7 +102,7 @@ Inputs are fully prepared outside the measurement timers.
 
 The loose serial cut is a heuristic: serial losers can win under different
 shared-cache/SMT pressure. No eliminated candidate is restored. For a more
-exhaustive check, use the ordinary siqs-sieve-bench sweeps with longer/repeated
+exhaustive check, use the ordinary bench-sieve sweeps with longer/repeated
 measurements. Every measured worker must finish its assigned work and every
 logical sieve byte must match its input's unblocked reference.
 
@@ -147,7 +147,7 @@ are installed. Source/build settings and TODO files are never edited by the tool
 VALIDATION
 ----------
 
-Repository-only aggregate/alias/pool/protocol tests: make check-siqs-autotune.
+Repository-only aggregate/alias/pool/protocol tests: make check-autotune.
 Wrapper-only tests without compilation: perl tests/siqs-autotune.t.
 Requires the existing GMP/POSIX-pthreads helper, independent of any host project
 normal build/test workflow.

@@ -1,6 +1,6 @@
 /* Real reduced SIQS matrices: dense versus serial block Lanczos.
  * See README-siqs-la-bench.txt. No production timing/capture hooks.
- * cc -std=c99 -O3 -march=native -falign-loops=32 -UPSIQS -o siqs-la-bench \
+ * cc -std=c99 -O3 -march=native -falign-loops=32 -UPSIQS -o bench-solvers \
  *   tools/siqs-la-bench.c siqs.c pr32_iter.c squfof126.c -lgmp -lm
  * Copyright (c) 2026 Dana Jacobsen. See LICENSE for redistribution terms.
  */
@@ -12,16 +12,13 @@
 #include <time.h>
 
 #if defined(PSIQS)
-#error "Build siqs-la-bench with -UPSIQS (serial)"
+#error "Build bench-solvers with -UPSIQS (serial)"
 #endif
 #define la_reduce_matrix bench_original_reduce
 #include "../lanczos.c"
 #undef la_reduce_matrix
 #include "../siqs.h"
-#include "../siqs_dep.h"
 #include "../pr32_iter.h"
-
-int siqs_is_prob_prime(const mpz_t n) { return mpz_probab_prime_p(n, 25); }
 
 typedef struct {
   double cpu, wall;
@@ -36,7 +33,7 @@ static uint64_t bench_seed = UINT64_C(0x6ad37249f08e15cb);
 static double bench_clock(clockid_t clock_id) {
   struct timespec value;
   if (clock_gettime(clock_id, &value) != 0)
-    croak("siqs-la-bench: clock_gettime failed\n");
+    croak("bench-solvers: clock_gettime failed\n");
   return (double)value.tv_sec + 1e-9 * (double)value.tv_nsec;
 }
 
@@ -82,22 +79,22 @@ static void bench_verify(unsigned long nrows, unsigned long ncols,
   uint64_t *parity, present = 0;
   unsigned long c, row;
   if (deps == NULL || mask == 0)
-    croak("siqs-la-bench: solver returned no dependencies\n");
+    croak("bench-solvers: solver returned no dependencies\n");
   parity = (uint64_t *)nla_calloc(nrows != 0 ? (size_t)nrows : 1U, sizeof(*parity));
   for (c = 0; c < ncols; c++) {
     uint32_t i;
     if ((deps[c] & ~mask) != 0)
-      croak("siqs-la-bench: dependency outside result mask\n");
+      croak("bench-solvers: dependency outside result mask\n");
     present |= deps[c];
     for (i = 0; i < columns[c].weight; i++) {
       row = columns[c].data[i];
-      if (row >= nrows) croak("siqs-la-bench: row outside matrix\n");
+      if (row >= nrows) croak("bench-solvers: row outside matrix\n");
       parity[row] ^= deps[c];
     }
   }
-  if (present != mask) croak("siqs-la-bench: empty dependency reported\n");
+  if (present != mask) croak("bench-solvers: empty dependency reported\n");
   for (row = 0; row < nrows; row++)
-    if (parity[row] != 0) croak("siqs-la-bench: invalid dependency\n");
+    if (parity[row] != 0) croak("bench-solvers: invalid dependency\n");
   free(parity);
 }
 
@@ -164,11 +161,11 @@ void la_reduce_matrix(unsigned long *nrows, unsigned long *ncols,
 static unsigned long bench_number(const char *text, unsigned long maximum) {
   char *end;
   unsigned long value;
-  if (text[0] < '0' || text[0] > '9') croak("siqs-la-bench: expected positive integer\n");
+  if (text[0] < '0' || text[0] > '9') croak("bench-solvers: expected positive integer\n");
   errno = 0;
   value = strtoul(text, &end, 10);
   if (errno || *end != '\0' || value == 0 || value > maximum)
-    croak("siqs-la-bench: integer outside option range\n");
+    croak("bench-solvers: integer outside option range\n");
   return value;
 }
 
@@ -179,21 +176,21 @@ int main(int argc, char **argv) {
   int argument, status = 0;
   for (argument = 1; argument < argc; argument++) {
     if (strcmp(argv[argument], "--help") == 0) {
-      puts("siqs-la-bench [--repeats 6] [--min-cols 384] [--max-cols 8192]");
+      puts("bench-solvers [--repeats 6] [--min-cols 384] [--max-cols 8192]");
       puts("Read one positive decimal input per line on stdin (at most 245 bits).");
       puts("TSV timings compare current solvers on identical real reduced matrices.");
       return 0;
     }
-    if (argument + 1 >= argc) croak("siqs-la-bench: missing option value\n");
+    if (argument + 1 >= argc) croak("bench-solvers: missing option value\n");
     if (strcmp(argv[argument], "--repeats") == 0)
       bench_repeats = (unsigned int)bench_number(argv[++argument], 100);
     else if (strcmp(argv[argument], "--min-cols") == 0)
       bench_min_cols = bench_number(argv[++argument], 32768);
     else if (strcmp(argv[argument], "--max-cols") == 0)
       bench_max_cols = bench_number(argv[++argument], 32768);
-    else croak("siqs-la-bench: unknown option\n");
+    else croak("bench-solvers: unknown option\n");
   }
-  if (bench_min_cols > bench_max_cols) croak("siqs-la-bench: invalid column range\n");
+  if (bench_min_cols > bench_max_cols) croak("bench-solvers: invalid column range\n");
   fprintf(stderr, "Current dense cutoff: %lu reduced columns; %u repeats, paired seed/order rotation.\n",
           LA_DENSE_CROSSOVER_COLS, bench_repeats);
   puts("input\tbits\tmatrix\trows\tcols\tnnz\trepeats\tdense_cpu_ms\tlanczos_cpu_ms\tdense_wall_ms\tlanczos_wall_ms\tlanczos_over_dense\tdense_deps\tlanczos_min_deps\tlanczos_max_deps");
@@ -210,19 +207,19 @@ int main(int argc, char **argv) {
     while (*end >= '0' && *end <= '9') end++;
     while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') *end++ = '\0';
     if (*end != '\0' || end == start || mpz_set_str(n, start, 10) != 0 || mpz_cmp_ui(n, 4) < 0) {
-      fprintf(stderr, "siqs-la-bench: invalid decimal input\n"); status = 2; break;
+      fprintf(stderr, "bench-solvers: invalid decimal input\n"); status = 2; break;
     }
     bench_input_bits = (unsigned int)mpz_sizeinbase(n, 2);
     /* Keep this small-matrix tool out of 2LP's nested SIQS cofactor calls. */
     if (bench_input_bits >= 246U) {
-      fprintf(stderr, "siqs-la-bench: input exceeds 245 bits\n"); status = 2; break;
+      fprintf(stderr, "bench-solvers: input exceeds 245 bits\n"); status = 2; break;
     }
     bench_input_id++;
     bench_matrix_id = 0;
     factors = gmp_siqs(n, &nfactors, 0, 0);
     mpz_set_ui(product, 1);
     for (i = 0; i < nfactors; i++) {
-      if (mpz_cmp_ui(factors[i], 1) <= 0 || !siqs_is_prob_prime(factors[i])) status = 1;
+      if (mpz_cmp_ui(factors[i], 1) <= 0 || !mpz_probab_prime_p(factors[i], 15)) status = 1;
       mpz_mul(product, product, factors[i]);
     }
     if (nfactors < 2 || mpz_cmp(product, n) != 0) status = 1;

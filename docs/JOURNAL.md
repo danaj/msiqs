@@ -25,7 +25,7 @@ the final job record; an interrupted writer remains available for restart.
 `--json` provides structured information, including RNG checkpoints and byte
 accounting. `--strict` rejects an incomplete final frame.
 
-For the private POSIX development checks, run `make check-siqs-journal`.
+For the private POSIX development checks, run `make check-journal`.
 Their binaries and logs go to a reported temporary directory. Set
 `SIQS_JOURNAL_TEST_DIR` to choose a different artifact directory.
 

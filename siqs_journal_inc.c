@@ -1,5 +1,5 @@
 /* Coordinator-owned relation journal. Included after the graph/chooser code.
- * See JOURNAL.md. Nothing here is called by sieve workers. */
+ * See docs/JOURNAL.md. Nothing here is called by sieve workers. */
 
 #include <errno.h>
 #include <fcntl.h>

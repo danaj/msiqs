@@ -15,11 +15,10 @@
 /* Host lifetime for both entry points:
  *   - No prime-cache startup/shutdown is required.  The independent pr32_iter
  *     uses immutable base tables and iterator-owned segment buffers.
- *   - Calls have independent writable state and may run concurrently
- *     with reentrant siqs_dep.h host adapters and separate output storage.
- *     Inputs may be shared read-only, but must not be mutated/cleared during
- *     calls.  Keep adapter configuration immutable or properly synchronized.
- * See README.md for adapters, builds, and an example. */
+ *   - Calls have independent writable state and may run concurrently with
+ *     separate output storage. Inputs may be shared read-only, but must not
+ *     be mutated or cleared during calls.
+ * See README.md for builds and an example. */
 
 /* n must be positive.  Return an allocated multiplicative partition of n.
  * Partition elements are not necessarily prime, and any partial splitting is

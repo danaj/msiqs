@@ -38,7 +38,8 @@ static uint32_t check_fb_prime_next(pr32_iter_t *iter) {
 #undef pr32_iter_next
 #include "../mont64.h"
 #undef squfof126
-#undef siqs_is_prob_prime
+#undef mpz_probab_prime_p
+#define mpz_probab_prime_p check_real_prob_prime
 #undef malloc
 #undef calloc
 #undef pthread_create

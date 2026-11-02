@@ -1,7 +1,8 @@
 # Documentation graphs
 
-These nine SVGs are the published presentation assets for README.md,
-EVOLUTION.md, and BENCHMARKS.md. They are generated output; do not edit
+These nine SVGs are the published presentation assets for
+[README.md](../../README.md), [EVOLUTION.md](../EVOLUTION.md), and
+[BENCHMARKS.md](../BENCHMARKS.md). They are generated output; do not edit
 their measured values or historical program labels by hand.
 
 provenance.json records graph hashes, historical source workspaces, and

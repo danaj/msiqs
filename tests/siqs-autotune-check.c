@@ -1,5 +1,5 @@
 /* Optional aggregate/pool tests, not part of the Perl module's test suite.
- * Build with the same dependencies as siqs-sieve-bench.
+ * Build with the same dependencies as bench-sieve.
  * Copyright (c) 2026 Dana Jacobsen. See LICENSE for redistribution terms. */
 #define SIQS_SIEVE_BENCH_MAIN siqs_autotune_unused_benchmark_main
 #include "../tools/siqs-sieve-bench.c"

@@ -10,7 +10,7 @@ use Getopt::Long qw(GetOptions);
 # Only core Perl modules are needed. Keep measured output off stdout in the
 # flags-only mode so a caller can safely capture the complete result.
 my $root = File::Spec->rel2abs(File::Spec->catdir($Bin, '..'));
-my $bench = File::Spec->catfile($root, 'siqs-sieve-bench');
+my $bench = File::Spec->catfile($root, 'bench-sieve');
 my ($threads, $sizes, $seconds, $output, $flags_only, $flags_progress, $help) =
    (1, '0,16,32,48,64,96,128', 2, undef, 0, 0, 0);
 Getopt::Long::Configure(qw(no_auto_abbrev no_ignore_case));
@@ -29,9 +29,9 @@ usage: tools/siqs-autotune.pl [options] [INTEGER ...]
   --output FILE     Raw block-screen TSV; refuses existing files.
   --flags-only      Print only suggested -D flags (alias --onlyflags).
   --flags           Flags on stdout, concise progress/decision on stderr.
-  --bench FILE      Alternative siqs-sieve-bench executable.
+  --bench FILE      Alternative bench-sieve executable.
 
-Build first with 'make siqs-sieve-bench'. Defaults are RSA-100/RSA-110
+Build first with 'make bench-sieve'. Defaults are RSA-100/RSA-110
 (330/364 bits); INTEGER arguments replace them (up to 16 distinct inputs).
 Combine per-input relative timings with an equal-weight geometric mean.
 Screen for 200 ms serial, 400 ms at --threads, then two 400 ms final sweeps.
@@ -40,8 +40,8 @@ The work-rate probe uses the first input's serial collection pipeline, with
 no solving. Run on an idle machine.
 No files or build settings are changed, except an explicitly requested TSV.
 
-'make siqs-tuned' measures and rebuilds msiqs with the suggested flags.
-Use SIQS_TUNE_ARGS='--threads 8' to screen at another concurrency.
+'make tuned' measures and rebuilds msiqs with the suggested flags.
+Use TUNE_ARGS='--threads 8' to screen at another concurrency.
 See tools/README-siqs-autotune.txt for caveats and manual build examples.
 HELP
   exit 0;
@@ -53,7 +53,7 @@ die "--threads must be positive.\n" unless $threads > 0;
 die "--work-seconds must be in [0,60].\n"
   unless $seconds >= 0 && $seconds <= 60;
 $bench = File::Spec->rel2abs($bench);
-die "Cannot execute $bench; build with 'make siqs-sieve-bench' first.\n"
+die "Cannot execute $bench; build with 'make bench-sieve' first.\n"
   unless -x $bench;
 my @command = ($bench, '--autotune', '--threads', $threads,
                '--sizes', $sizes, '--work-seconds', $seconds);

@@ -14,7 +14,8 @@ hand-written assembly or explicit SIMD intrinsics.
 
 ## Installation and use
 
-Building requires a C compiler and GMP.  You do *not* need Perl to build
+Building requires a C compiler and GMP (6.2 or newer recommended).
+You do *not* need Perl to build
 the standalone tool, which can be compiled with a single CC line.
 
 ### Standalone program
@@ -37,7 +38,7 @@ factoring thread, and very small inputs may stay serial even when more
 are requested.  `-v` prints setup and final summaries, `-vv` adds progress.
 With no integers on the command line, `msiqs` reads whitespace or newline
 separated inputs from stdin.
-See [build and API notes](IMPLEMENTATION.md#build-and-api-notes) for
+See [build and API notes](docs/IMPLEMENTATION.md#build-and-api-notes) for
 compiler options and serial-only builds.
 
 To save relation collection and resume it later, use an optional journal:
@@ -48,19 +49,17 @@ To save relation collection and resume it later, use an optional journal:
 python3 tools/journal-info.py --follow --eta job.journal
 ```
 
-The [journal guide](JOURNAL.md) describes restart behavior, inspection and
+The [journal guide](docs/JOURNAL.md) describes restart behavior, inspection and
 the file format. Journalling is off unless requested.
 
 ### Embedding in C
 
 The independent [embedded package](embedded/README.md) supplies a frozen,
-serial GMP-based SIQS and a GMP-free TinySIQS128. Updates are manual.
+serial GMP-based SIQS, a GMP-free TinySIQS128, and GF(2) matrix solvers,
+with build and API instructions. Updates are manual.
 
-The [SIQS embedding guide](tools/README-siqs-embedding.txt) gives build
-instructions and host examples.
-The [matrix solvers](tools/README-lanczos-embedding.md) can also be
-embedded independently, without GMP, and are not tied to this
-SIQS implementation.
+The [matrix solvers](docs/LANCZOS-USE.md) can also be embedded independently,
+without GMP, and are not tied to this SIQS implementation.
 
 ## SIQS Performance at a glance
 
@@ -77,8 +76,8 @@ balanced semiprimes and an October 2026 SIQS build.
 | 80 | 39 s | 5.6s | 66 MiB |
 | 100 | 51 min | 7 min | 410 MiB |
 
-With 8 threads on a 2021 MacBook M1 Pro, RSA-100 completed in 4m 58.7s,
-RSA-110 in 51m 36.5s.
+With 8 threads on a 2021 MacBook M1 Pro, RSA-100 completed in 4m 42.8s,
+RSA-110 in 50m 55.9s.
 
 A 2026 MacBook M5 Pro with 18 threads completed RSA-100 in 2m 16.2s.
 
@@ -93,7 +92,7 @@ Timing results on a 48-core AMD Turin (EPYC 9B45, Zen5), 48 threads:
 
 A 96-core Xeon 8581C completed RSA-130 in 5h 44m on October 24 2026.
 
-More comparisons can be seen in the [benchmarks document](BENCHMARKS.md)
+More comparisons can be seen in the [benchmarks document](docs/BENCHMARKS.md)
 
 ### Supported range
 
@@ -111,16 +110,16 @@ of a generic factoring package, as in a general-purpose factoring routine, or in
 
 ## Further reading
 
-- [implementation details](IMPLEMENTATION.md)
-- [evolution and history](EVOLUTION.md)
-- [benchmark comparisons and methodology](BENCHMARKS.md)
-- [benchmark graphs](graphs/).
+- [implementation details](docs/IMPLEMENTATION.md)
+- [evolution and history](docs/EVOLUTION.md)
+- [benchmark comparisons and methodology](docs/BENCHMARKS.md)
+- [benchmark graphs](docs/graphs/).
 
 ## Checks and license
 
 `make check` runs the SIQS checks. Additional targets are
-`make check-embedded`, `make check-pr32-iter`, `make check-siqs-autotune`,
-and `make check-siqs-journal`. Developer checks use core Perl and Python 3;
+`make check-embedded`, `make check-pr32`, `make check-autotune`,
+and `make check-journal`.  Developer checks use core Perl and Python 3.
 
 Current sources are [MIT licensed](LICENSE). See [source history](docs/history/README.md)
 for the extraction, original commit maps, and historical notices.

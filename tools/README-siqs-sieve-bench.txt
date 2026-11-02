@@ -5,16 +5,16 @@ Build and run commands below assume the repository root.
 
 Build only (regenerate Makefile after pulling the new target if necessary;
 this is an optional developer tool):
-  make siqs-sieve-bench
+  make bench-sieve
 
 Or compile directly with a C compiler:
   cc -std=c99 -O3 -march=native -falign-loops=32 -DPSIQS -pthread \
-    -o siqs-sieve-bench tools/siqs-sieve-bench.c lanczos.c \
+    -o bench-sieve tools/siqs-sieve-bench.c lanczos.c \
     pr32_iter.c squfof126.c -lgmp -lm
 
 Run on an idle machine:
-  ./siqs-sieve-bench
-  ./siqs-sieve-bench --threads 4 --output blocks-4.tsv
+  ./bench-sieve
+  ./bench-sieve --threads 4 --output blocks-4.tsv
 
 For a short staged screen and advisory compiler flags, see siqs-autotune.pl
 and README-siqs-autotune.txt. Ordinary sweeps below remain available unchanged.
@@ -27,7 +27,7 @@ One thread is genuinely serial; at larger counts the caller is one sieve worker
 and a persistent pool supplies the others. Thread creation is outside timing.
 
 Custom block maxima need not be powers of two:
-  ./siqs-sieve-bench --threads 4 --sizes 0,12,14,16,18,24,32,64,96,128,256
+  ./bench-sieve --threads 4 --sizes 0,12,14,16,18,24,32,64,96,128,256
 
 IMPORTANT: The maximum is not the actual balanced block size. Production's
 activation rule is retained by default: logical interval >= 2.5 x maximum.
@@ -39,7 +39,7 @@ code-layout differences. Off is always included as the control. Block size also
 changes the dense/sparse prime split.
 
 For comparison with the smaller 250-bit example:
-  ./siqs-sieve-bench --threads 4 \
+  ./bench-sieve --threads 4 \
     1401811817899460116600945074728583412740519573015376930481203561750251051823
 
 Its current interval is 71.5 KiB: the 32/64 KiB maxima fall back to unblocked

@@ -1,9 +1,8 @@
 /* uint32_t prime iteration with immutable mod-30 base/presieve tables.
- * Derived from Math::Prime::Util::GMP's prime_iterator.c. The unrolled
- * wheel crossing retains its Kim Walisch-inspired organization.
+ * Derived from Math::Prime::Util::GMP's prime_iterator.c.
  *
  * Each bitmap byte represents residues 1,7,11,13,17,19,23,29 modulo 30;
- * a set bit marks a composite. The 3334-byte base covers 0..100019,
+ * a set bit marks a composite.  The 3334-byte base covers 0..100019,
  * including every prime needed to sieve any uint32_t segment endpoint.
  * The 1001-byte presieve marks multiples of 7, 11 and 13.
  * Tables are read-only: no shared allocations or startup/shutdown.
@@ -200,6 +199,8 @@ static void prefill(uint8_t *mem, uint32_t startd, uint32_t bytes) {
   }
 }
 
+
+/* This unrolling is inspired by Kim Walisch's mod-30 sieve. */
 /* Pointer advances are checked before forming them, including short tails. */
 #define set_bit(s,n)  *(s) |= (1 << n);
 static const uint8_t masknum30[30] =

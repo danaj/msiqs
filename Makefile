@@ -9,11 +9,11 @@ LDLIBS ?= -lgmp -lm
 PERL ?= perl
 PYTHON ?= python3
 EXTRA_FLAGS ?=
-SIQS_CHECK_ARGS ?=
-SIQS_TUNE_ARGS ?=
+CHECK_ARGS ?=
+TUNE_ARGS ?=
 
 SOURCES = msiqs.c siqs.c lanczos.c pr32_iter.c squfof126.c
-HEADERS = siqs.h siqs_dep.h lanczos.h siqs_choose_inc.c siqs_sieve_kernel_inc.c siqs_journal_inc.c \
+HEADERS = siqs.h lanczos.h siqs_choose_inc.c siqs_sieve_kernel_inc.c siqs_journal_inc.c \
 	psiqs_inc.c planczos_inc.c ptypes.h mont64.h pr32_iter.h \
 	squfof126.h
 BUILD = $(PERL) tools/build-siqs.pl --cc "$(CC)" \
@@ -22,64 +22,65 @@ BUILD = $(PERL) tools/build-siqs.pl --cc "$(CC)" \
 BUILD_DEPS = tools/build-siqs.pl tools/pthread-probe.c
 BENCH_DEPS = $(SOURCES) $(HEADERS)
 
-.PHONY: all siqs serial siqs-serial tuned siqs-tuned siqs-tuned-8 \
-	check check-siqs test-siqs check-pr32-iter check-siqs-autotune check-siqs-journal clean
+.PHONY: all siqs serial tuned tuned8 check test check-pr32 check-journal \
+	check-autotune check-embedded clean
 
 all: msiqs
 siqs: msiqs
 
-# Probe by linking, never running. Standalone objects never enter the module build.
+# Probe pthread support by linking, never running.
 msiqs: $(SOURCES) $(HEADERS) $(BUILD_DEPS) Makefile
 	@$(BUILD) --output $@ $(SOURCES)
 
 # Explicit overrides rebuild even an otherwise up-to-date executable.
-serial: siqs-serial
-siqs-serial: $(SOURCES) $(HEADERS) $(BUILD_DEPS)
+serial: $(SOURCES) $(HEADERS) $(BUILD_DEPS)
 	@$(BUILD) --output msiqs --serial $(SOURCES)
 
-tuned: siqs-tuned
-siqs-tuned: siqs-sieve-bench tools/siqs-autotune.pl
-	@siqs_tuned_flags=`$(PERL) tools/siqs-autotune.pl --flags $(SIQS_TUNE_ARGS)` && \
-	$(BUILD) --cflags "$(CFLAGS) $(EXTRA_FLAGS) $$siqs_tuned_flags" --output msiqs $(SOURCES)
+tuned: bench-sieve tools/siqs-autotune.pl
+	@tuned_flags=`$(PERL) tools/siqs-autotune.pl --flags $(TUNE_ARGS)` && \
+	$(BUILD) --cflags "$(CFLAGS) $(EXTRA_FLAGS) $$tuned_flags" --output msiqs $(SOURCES)
 
-siqs-tuned-8:
-	$(MAKE) siqs-tuned SIQS_TUNE_ARGS='--threads 8'
+tuned8:
+	$(MAKE) tuned TUNE_ARGS='--threads 8'
 
-lanczos-bench: tools/lanczos-bench.c lanczos.c lanczos.h planczos_inc.c siqs_dep.h ptypes.h $(BUILD_DEPS) Makefile
+bench-lanczos: tools/lanczos-bench.c lanczos.c lanczos.h planczos_inc.c ptypes.h $(BUILD_DEPS) Makefile
 	@$(BUILD) --ldlibs "-lm" --output $@ tools/lanczos-bench.c
 
-siqs-la-bench: tools/siqs-la-bench.c $(BENCH_DEPS) $(BUILD_DEPS) Makefile
+bench-solvers: tools/siqs-la-bench.c $(BENCH_DEPS) $(BUILD_DEPS) Makefile
 	@$(BUILD) --serial --output $@ tools/siqs-la-bench.c siqs.c pr32_iter.c squfof126.c
 
-siqs-sieve-bench: tools/siqs-sieve-bench.c tools/siqs-autotune.inc.c $(BENCH_DEPS) $(BUILD_DEPS) Makefile
+bench-sieve: tools/siqs-sieve-bench.c tools/siqs-autotune.inc.c $(BENCH_DEPS) $(BUILD_DEPS) Makefile
 	@$(BUILD) --output $@ tools/siqs-sieve-bench.c lanczos.c pr32_iter.c squfof126.c
 
-# Developer correctness checks.
-# To force serial checks: make check-siqs SIQS_CHECK_ARGS=--serial
-check: check-siqs
-test-siqs: check-siqs
-check-siqs:
-	$(PERL) tests/siqs-check.pl --cc "$(CC)" --cflags "$(CPPFLAGS) $(CFLAGS) $(EXTRA_FLAGS)" --ldflags "$(LDFLAGS) $(LDLIBS)" $(SIQS_CHECK_ARGS)
+# The main and embedded runners manage their temporary-directory cleanup.
+# To force serial checks: make check CHECK_ARGS=--serial
+check:
+	$(PERL) tests/siqs-check.pl --cc "$(CC)" --cflags "$(CPPFLAGS) $(CFLAGS) $(EXTRA_FLAGS)" --ldflags "$(LDFLAGS) $(LDLIBS)" $(CHECK_ARGS)
 
-pr32-iter-check: tests/pr32-iter-check.c pr32_iter.c pr32_iter.h Makefile
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_FLAGS) -o $@ tests/pr32-iter-check.c $(LDFLAGS)
+test: check
 
-check-pr32-iter: pr32-iter-check
-	@trap 'rm -f pr32-iter-check' 0; ./pr32-iter-check
+# Install cleanup before compiling, and preserve a failing command's status.
+check-pr32: tests/pr32-iter-check.c pr32_iter.c pr32_iter.h Makefile
+	@trap 'rm -f check-pr32' 0; \
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_FLAGS) -o check-pr32 tests/pr32-iter-check.c $(LDFLAGS) && \
+	./check-pr32
 
-check-siqs-journal:
-	$(PYTHON) tests/journal/run-all.py
+check-journal:
+	@journal_dir="$${SIQS_JOURNAL_TEST_DIR:-}"; \
+	if [ -z "$$journal_dir" ]; then \
+	  journal_dir=$$(mktemp -d "$${TMPDIR:-/tmp}/msiqs-journal-check.XXXXXXXX") || exit $$?; \
+	fi; \
+	trap 'for journal_bin in msiqs msiqs-serial journal-seeds journal-attempts journal-graph; do rm -f "$$journal_dir/$$journal_bin"; done' 0; \
+	SIQS_JOURNAL_TEST_DIR="$$journal_dir" $(PYTHON) tests/journal/run-all.py
 
-siqs-autotune-check: tests/siqs-autotune-check.c tools/siqs-sieve-bench.c tools/siqs-autotune.inc.c $(BENCH_DEPS) $(BUILD_DEPS) Makefile
-	@$(BUILD) --output $@ tests/siqs-autotune-check.c lanczos.c pr32_iter.c squfof126.c
-
-check-siqs-autotune: siqs-autotune-check
-	./siqs-autotune-check
+check-autotune: tests/siqs-autotune-check.c tools/siqs-sieve-bench.c tools/siqs-autotune.inc.c $(BENCH_DEPS) $(BUILD_DEPS) Makefile
+	@trap 'rm -f check-autotune' 0; \
+	$(BUILD) --output check-autotune tests/siqs-autotune-check.c lanczos.c pr32_iter.c squfof126.c && \
+	./check-autotune && \
 	$(PERL) tests/siqs-autotune.t
 
-clean:
-	rm -f msiqs lanczos-bench siqs-la-bench siqs-sieve-bench siqs-autotune-check pr32-iter-check
-
-.PHONY: check-embedded
 check-embedded:
 	$(PYTHON) tests/check-embedded.py
+
+clean:
+	rm -f msiqs bench-lanczos bench-solvers bench-sieve check-pr32 check-autotune

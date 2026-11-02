@@ -1,27 +1,26 @@
 SIQS standalone health checks
 =============================
 
-These repository-only developer checks exercise the current SIQS implementation.
-They are not included in the Perl distribution.
-They do not build/load the Perl XS module, run performance benchmarks, or
-attempt complete large factorizations. They are not part of ordinary
-"make test". Production sources and benchmark builds are not modified.
+These developer checks exercise the current SIQS implementation.
+They do not run performance benchmarks or attempt complete large
+factorizations. "make check" and "make test" run the normal suite.
+Production sources and benchmark builds are not modified.
 
 From the repository checkout (no module configuration needed):
 
-  make -C siqs check-siqs
-  make -C siqs test-siqs                          # alias
-  make -C siqs check-siqs SIQS_CHECK_ARGS=--serial # force a serial-only checker
-  make -C siqs check-siqs SIQS_CHECK_ARGS='--extended --verbose'
-  make -C siqs check-siqs SIQS_CHECK_ARGS='--sanitize'
+  make check
+  make test                          # alias
+  make check CHECK_ARGS=--serial # force a serial-only checker
+  make check CHECK_ARGS='--extended --verbose'
+  make check CHECK_ARGS='--sanitize'
 
 The Make target uses only a core-Perl (5.10+) build wrapper, the C compiler,
 and GMP.
 It first runs the independent pr32_iter checks. These can also be run with
-"make -C siqs check-pr32-iter" and require neither Perl nor GMP. They compare
+"make check-pr32" and require neither Perl nor GMP. They compare
 against a separate reference sieve and trial division, exercise UINT32_MAX,
 and inject allocation failures to check cleanup and retry.
-Like "make -C siqs", it detects pthread support with a compile/link probe and
+Like "make", it detects pthread support with a compile/link probe and
 includes all pthread Lanczos/worker checks when available. The probe is never
 executed. Use --serial to disable pthreads, or --threaded to require them.
 A checker build or test failure never causes a retry in serial mode.
@@ -31,7 +30,7 @@ be installed or built. Use --keep to retain the binary.
 
 Direct build without Perl or a generated Makefile, from the repository root:
 
-  cc -O3 -DSTANDALONE -o /tmp/siqs-check tests/siqs-check.c \
+  cc -std=c99 -O3 -o /tmp/siqs-check tests/siqs-check.c \
     pr32_iter.c squfof126.c -lgmp -lm
   /tmp/siqs-check --suite sieve
   /tmp/siqs-check --extended --verbose
@@ -83,7 +82,7 @@ be registered without creating separate executables or a large framework.
   perl tests/siqs-check.pl --suite relations
   perl tests/siqs-check.pl --suite matrix --extended
   perl tests/siqs-check.pl --suite bids --sanitize --debug
-  make -C siqs check-siqs SIQS_CHECK_ARGS='--suite workers'
+  make check CHECK_ARGS='--suite workers'
   perl tests/siqs-check.pl --block-size 32768
   perl tests/siqs-check.pl --block-size 0
   perl tests/siqs-check.pl --sanitize
@@ -347,12 +346,12 @@ ordinary production source is not rewritten or exported for testing.
 
 ASan/UBSan can be used as above. Where ThreadSanitizer is supported:
 
-  make -C siqs check-siqs CFLAGS='-O1 -g -fsanitize=thread' \
-    SIQS_CHECK_ARGS='--suite workers'
+  make check CFLAGS='-O1 -g -fsanitize=thread' \
+    CHECK_ARGS='--suite workers'
 
 Do not combine ThreadSanitizer with --sanitize (ASan). Normal worker jobs do
 not acquire the allocation-injection lock, to avoid hiding races. These are
 regression fixtures, not an exhaustive proof of every possible schedule.
 The embedding contract is documented in siqs.h and
-tools/README-siqs-embedding.txt. Prime iteration uses immutable tables and
+embedded/README.md. Prime iteration uses immutable tables and
 per-iterator segment storage; concurrent callers need no global setup.

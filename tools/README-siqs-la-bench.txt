@@ -4,20 +4,20 @@ Dense / block-Lanczos crossover on real SIQS matrices
 Build and run commands below assume the repository root.
 
 Build from the repository root:
-  make siqs-la-bench
+  make bench-solvers
 or compile directly:
-  cc -std=c99 -O3 -march=native -falign-loops=32 -UPSIQS -o siqs-la-bench \
+  cc -std=c99 -O3 -march=native -falign-loops=32 -UPSIQS -o bench-solvers \
     tools/siqs-la-bench.c siqs.c pr32_iter.c squfof126.c -lgmp -lm
 
 Run on a QUIET machine, with unrelated factoring/benchmark queues paused:
-  ./siqs-la-bench --repeats 6 < inputs.txt > crossover.tsv
+  ./bench-solvers --repeats 6 < inputs.txt > crossover.tsv
 
 Inputs are positive decimal composites, one per line; blank lines and comment
 lines are allowed. Balanced semiprimes roughly 130..190 bits are useful around
 the current 1536-column crossover. The tool rejects inputs above 245 bits to
 avoid capturing recursive cofactor SIQS calls from the 2LP policies. It uses
-the ordinary serial SIQS entry point with current production parameters and
-primality adapter. No factor-base/interval settings or solver policy are changed.
+the ordinary serial SIQS entry point with current production parameters.
+No factor-base/interval settings or solver policy are changed.
 
 Including lanczos.c with the reduction entry point renamed lets a tool-only
 wrapper see each real matrix immediately after reduction. Both solvers see

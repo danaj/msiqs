@@ -5,7 +5,7 @@
  * no instrumentation or benchmark hooks are needed in production sources.
  *
  * cc -std=c99 -O3 -march=native -falign-loops=32 -DPSIQS -pthread \
- *    -o lanczos-bench tools/lanczos-bench.c -lm
+ *    -o bench-lanczos tools/lanczos-bench.c -lm
  * Copyright (c) 2026 Dana Jacobsen. See LICENSE for redistribution terms.
  */
 #ifndef _POSIX_C_SOURCE
@@ -18,7 +18,7 @@
 #include <unistd.h>
 
 #if !defined(PSIQS)
-#error "Build lanczos-bench with -DPSIQS -pthread"
+#error "Build bench-lanczos with -DPSIQS -pthread"
 #endif
 /* The benchmark may explore beyond production's provisional 32-thread cap.
  * This does not change the solver cap in the SIQS and parallel builds. */
@@ -58,13 +58,13 @@ static double bench_median(double *values, uint32_t count) {
 static double bench_wall(void) {
   struct timespec now;
   if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
-    croak("lanczos-bench: clock_gettime failed: %s", strerror(errno));
+    croak("bench-lanczos: clock_gettime failed: %s", strerror(errno));
   return (double)now.tv_sec + (double)now.tv_nsec / 1e9;
 }
 static double bench_cpu(void) {
   struct rusage usage;
   if (getrusage(RUSAGE_SELF, &usage) != 0)
-    croak("lanczos-bench: getrusage failed: %s", strerror(errno));
+    croak("bench-lanczos: getrusage failed: %s", strerror(errno));
   return (double)usage.ru_utime.tv_sec + (double)usage.ru_stime.tv_sec
        + ((double)usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1e6;
 }
@@ -109,7 +109,7 @@ static la_col_t *bench_matrix(uint32_t rows, uint32_t count, uint32_t weight,
     cols[c].weight = n;
     cols[c].data = data;
     if ((size_t)n > (size_t)-1 - *entries)
-      croak("lanczos-bench: matrix weight overflow");
+      croak("bench-lanczos: matrix weight overflow");
     *entries += n;
     for (i = 0; i < n; i++) counts[data[i]]++;
   }
@@ -171,10 +171,10 @@ static uint32_t bench_verify(uint32_t rows, uint32_t count, const la_col_t *cols
   uint64_t used = 0, basis[64] = {0};
   uint64_t *parity = (uint64_t *)nla_calloc(rows, sizeof(*parity));
   if (result == NULL || mask == 0)
-    croak("lanczos-bench: solver returned no dependencies");
+    croak("bench-lanczos: solver returned no dependencies");
   for (c = 0; c < count; c++) {
     uint64_t bits = result[c];
-    if ((bits & ~mask) != 0) croak("lanczos-bench: dependency mask mismatch");
+    if ((bits & ~mask) != 0) croak("bench-lanczos: dependency mask mismatch");
     used |= bits;
     for (i = 0; i < cols[c].weight; i++) parity[cols[c].data[i]] ^= bits;
     for (i = 0; i < 64U && bits != 0; i++) {
@@ -185,11 +185,11 @@ static uint32_t bench_verify(uint32_t rows, uint32_t count, const la_col_t *cols
     }
   }
   for (i = 0; i < rows; i++)
-    if (parity[i] != 0) croak("lanczos-bench: invalid dependency");
-  if (used != mask) croak("lanczos-bench: empty dependency");
+    if (parity[i] != 0) croak("bench-lanczos: invalid dependency");
+  if (used != mask) croak("bench-lanczos: empty dependency");
   for (i = 0; i < 64U; i++) {
     if ((basis[i] != 0) != ((mask & (UINT64_C(1) << i)) != 0))
-      croak("lanczos-bench: dependent dependency lanes");
+      croak("bench-lanczos: dependent dependency lanes");
     if (basis[i]) dependencies++;
   }
   free(parity);
@@ -200,16 +200,16 @@ static uint32_t bench_number(const char *text) {
   char *end;
   unsigned long value;
   if (text[0] < '0' || text[0] > '9')
-    croak("lanczos-bench: invalid number: %s", text);
+    croak("bench-lanczos: invalid number: %s", text);
   errno = 0;
   value = strtoul(text, &end, 10);
   if (errno != 0 || *end != '\0' || value > UINT32_MAX)
-    croak("lanczos-bench: invalid number: %s", text);
+    croak("bench-lanczos: invalid number: %s", text);
   return (uint32_t)value;
 }
 
 static void bench_usage(void) {
-  printf("Usage: lanczos-bench [options]\n"
+  printf("Usage: bench-lanczos [options]\n"
     "  --max-threads N  Sweep 1,2,4,8,...,N (default 8; includes exact N).\n"
     "  --repeat N       Runs per count (default 1; alternate sweep direction).\n"
     "  --rows N         Matrix rows (default 183590, observed RSA-110 size).\n"
@@ -238,7 +238,7 @@ int main(int argc, char **argv) {
     uint32_t value;
     if (strcmp(option, "--help") == 0) { bench_usage(); return 0; }
     if (strcmp(option, "--verbose") == 0) { bench_verbose = 1; continue; }
-    if (++arg == argc) croak("lanczos-bench: missing value for %s", option);
+    if (++arg == argc) croak("bench-lanczos: missing value for %s", option);
     if (strcmp(option, "--output") == 0) { output = argv[arg]; continue; }
     value = bench_number(argv[arg]);
     if      (strcmp(option, "--max-threads") == 0) maximum = value;
@@ -247,14 +247,14 @@ int main(int argc, char **argv) {
     else if (strcmp(option, "--weight") == 0) weight = value;
     else if (strcmp(option, "--head") == 0) head = value;
     else if (strcmp(option, "--seed") == 0) seed = value;
-    else croak("lanczos-bench: unknown option: %s", option);
+    else croak("bench-lanczos: unknown option: %s", option);
   }
   if (maximum == 0 || maximum > NLA_MAX_THREADS)
-    croak("lanczos-bench: max threads must be 1..%u", (unsigned int)NLA_MAX_THREADS);
+    croak("bench-lanczos: max threads must be 1..%u", (unsigned int)NLA_MAX_THREADS);
   if (repeats == 0 || seed == 0 || weight < 2U || rows < 128U ||
       rows > UINT32_MAX - 64U || head >= rows ||
       (uint64_t)weight + weight / 3U > rows - head)
-    croak("lanczos-bench: invalid size, weight, head, seed, or repeat count");
+    croak("bench-lanczos: invalid size, weight, head, seed, or repeat count");
   count = rows + 64U;
   counts[ncounts++] = 1U;
   for (c = 2U; c <= maximum; c *= 2U) {
@@ -263,14 +263,14 @@ int main(int argc, char **argv) {
   }
   if (counts[ncounts - 1U] != maximum) counts[ncounts++] = maximum;
   if ((size_t)repeats > (size_t)-1 / ncounts)
-    croak("lanczos-bench: repeat count exceeds allocation range");
+    croak("bench-lanczos: repeat count exceeds allocation range");
   if (output != NULL) {
     int descriptor = open(output, O_WRONLY | O_CREAT | O_EXCL, 0666);
-    if (descriptor < 0) croak("lanczos-bench: cannot create %s: %s", output, strerror(errno));
+    if (descriptor < 0) croak("bench-lanczos: cannot create %s: %s", output, strerror(errno));
     tsv = fdopen(descriptor, "w");
     if (tsv == NULL) {
       close(descriptor);
-      croak("lanczos-bench: fdopen failed: %s", strerror(errno));
+      croak("bench-lanczos: fdopen failed: %s", strerror(errno));
     }
     fprintf(tsv, "rows\tcolumns\tentries\ttail_weight\thead\tseed\trepeat\trequested_threads\teffective_threads\tpacked\twall_s\tcpu_s\tdependencies\tattempts\tverified\n");
     fflush(tsv);
@@ -293,7 +293,7 @@ int main(int argc, char **argv) {
       else {
         if (mask != reference_mask ||
             memcmp(result, reference, (size_t)count * sizeof(*result)) != 0)
-          croak("lanczos-bench: solve differs from the serial reference");
+          croak("bench-lanczos: solve differs from the serial reference");
         free(result);
       }
       printf("DONE  threads %u (actual %u): %.3f wall, %.3f CPU, %u dependencies, %u attempt(s)%s\n",
@@ -305,7 +305,7 @@ int main(int argc, char **argv) {
           rows, count, (unsigned long)entries, weight, head, seed, repeat + 1U,
           run->requested, run->effective, run->packed, run->wall, run->cpu,
           run->dependencies, run->attempts);
-        if (fflush(tsv) != 0) croak("lanczos-bench: TSV write failed");
+        if (fflush(tsv) != 0) croak("bench-lanczos: TSV write failed");
       }
     }
   }
@@ -328,7 +328,7 @@ int main(int argc, char **argv) {
     printf(" %7u  %6u  %10.3fs  %7.3f..%-7.3f  %7.2fx  %10.3fs\n",
       counts[point], effective, median, low, high, serial_median / median, cpu);
   }
-  if (tsv != NULL && fclose(tsv) != 0) croak("lanczos-bench: TSV close failed");
+  if (tsv != NULL && fclose(tsv) != 0) croak("bench-lanczos: TSV close failed");
   free(reference); free(runs); free(times);
   for (c = 0; c < count; c++) free(cols[c].data);
   free(cols);

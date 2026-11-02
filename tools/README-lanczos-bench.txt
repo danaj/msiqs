@@ -4,21 +4,21 @@ BLOCK-LANCZOS SCALING BENCHMARK
 Build and run commands below assume the repository root.
 
 Build only (does not run a large benchmark):
-  make lanczos-bench
+  make bench-lanczos
 
 Or compile directly with a C compiler:
   cc -std=c99 -O3 -march=native -falign-loops=32 -DPSIQS -pthread \
-    -o lanczos-bench tools/lanczos-bench.c -lm
+    -o bench-lanczos tools/lanczos-bench.c -lm
 
 The benchmark and solver have no GMP or SIQS host-adapter dependency.
 Diagnostic verbosity is passed explicitly. Requires POSIX pthreads,
 clock_gettime(CLOCK_MONOTONIC), and getrusage.
 
 Example full-size run:
-  ./lanczos-bench --max-threads 64 --repeat 3 --output lanczos-110.tsv
+  ./bench-lanczos --max-threads 64 --repeat 3 --output lanczos-110.tsv
 
 Quick functional/small scaling check:
-  ./lanczos-bench --rows 33000 --max-threads 8 --output lanczos-small.tsv
+  ./bench-lanczos --rows 33000 --max-threads 8 --output lanczos-small.tsv
 
 Sweep: 1, 2, 4, 8, ... up to the maximum, including the exact maximum if not
 a power of two (e.g. --max-threads 10 includes 10). Counts include the caller,

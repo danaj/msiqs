@@ -239,7 +239,7 @@ Smooth-only profiles use `K_L = 1`.
 `SIQS_POLICY_LINEAR(base, step, origin)` permits extrapolation from
 its origin.  `SIQS_POLICY_RAMP(beg, end, first_bits, last_bits)` stores
 endpoint values and interpolates linearly between them; extrapolation
-is an error.  The policy table and its comments in [siqs.c](siqs.c)
+is an error.  The policy table and its comments in [siqs.c](../siqs.c)
 describe the other parameters.
 
 The sieve-hit exponent sets a separate coarse residual allowance,
@@ -269,7 +269,7 @@ Run the commands in this section from the repository root.
 `make siqs` builds `msiqs` with pthread support when a compile/link probe
 succeeds, otherwise serial-only.  `-t N`, `--threads N`, and `-threads N`
 are equivalent ways to request workers in a threaded build.
-`make siqs-serial` always rebuilds `msiqs` without
+`make serial` always rebuilds `msiqs` without
 threading.  Remove `msiqs` before rebuilding to return to
 autodetection or after changing compiler settings.
 
@@ -295,7 +295,7 @@ Thread count is a resource choice, not a
 promise of linear scaling, particularly during linear algebra.
 
 For use in another C project, see the
-[SIQS embedding guide](tools/README-siqs-embedding.txt) and the
-[matrix-solver embedding guide](tools/README-lanczos-embedding.md).
+[embedded README](../embedded/README.md) and the
+[matrix-solver usage guide](LANCZOS-USE.md).
 The low-level SIQS interface returns an array of factors whose product
 equals the input.  Some factors may remain composite.

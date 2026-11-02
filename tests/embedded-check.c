@@ -1,6 +1,5 @@
 #include "../embedded/siqs.c"
 #include <stdio.h>
-int siqs_is_prob_prime(const mpz_t n) { return mpz_probab_prime_p(n,25); }
 static void check_lanczos(void) {
   unsigned long rows=2000,cols=2064,c,r;int mode;
   la_col_t *columns=(la_col_t *)calloc(cols,sizeof(*columns));

@@ -1,20 +1,21 @@
 /*============================================================================
 
-  Standalone driver and host dependencies for msiqs.
+  Command-line driver for msiqs.
 
-  Direct build from the siqs/ directory:
+  Direct build from the repository root:
 
-    cc -std=c99 -O3 -falign-loops=32 -o msiqs msiqs.c siqs.c lanczos.c pr32_iter.c ../squfof126.c -lgmp -lm
+    cc -std=c99 -O3 -march=native -falign-loops=32  -DPSIQS -pthread  -o msiqs  msiqs.c siqs.c lanczos.c pr32_iter.c squfof126.c  -lgmp -lm
 
-  Add -march=native when building a binary for the local machine only.
+  Remove '-march=native' if building a portable binary.
+  Remove '-DPSIQS -pthread' for a serial build.
+
   Loop alignment avoids placement-sensitive sieve slowdowns on x86.
-  Add -DPSIQS -pthread for the parallel build.  The local Makefile needs no
-  module configuration: make detects pthreads, while make siqs-serial forces
-  a serial-only build.  Both targets produce msiqs.
 
-  Prime iteration needs no global startup/shutdown.
-  Custom C hosts must own the same lifetime and supply the siqs_dep.h adapters;
-  see tools/README-siqs-embedding.txt. Do not link this main into another driver.
+  The local Makefile needs no module configuration: make detects pthreads,
+  make serial forces a serial-only build.  Both targets produce msiqs.
+
+  See embedded/README.md for C integration.
+  Do not link this main into another driver.
 
   Copyright (c) 2026 Dana Jacobsen
 
@@ -30,16 +31,9 @@
 #include "ptypes.h"
 #include "pr32_iter.h"
 #include "siqs.h"
-#include "siqs_dep.h"
 #define SIQS_PROGRAM_NAME "msiqs"
 
 static int verbose_level = 0;  /* -v summaries, -vv progress, -vvv diagnostics. */
-
-int siqs_is_prob_prime(const mpz_t n) {
-  /* BPSW on GMP >= 6.2; 15 Miller-Rabin rounds on older versions. */
-  return mpz_probab_prime_p(n, 15);
-}
-
 
 static void print_usage(FILE *stream, const char *program) {
   fprintf(stream,
@@ -140,7 +134,7 @@ static int collect_factors(const mpz_t n, siqs_factor_list_t *output,
     partition = gmp_siqs(current, &count, 2, verbose_level);
 #endif
     for (i = 0; i < count; i++) {
-      if (siqs_is_prob_prime(partition[i])) {
+      if (mpz_probab_prime_p(partition[i], 15)) {
         append_factor(output, partition[i]);
       } else if (mpz_cmp_ui(partition[i], 1) > 0 &&
                  mpz_cmp(partition[i], current) < 0) {

@@ -12,9 +12,6 @@
   Copyright (c) 2026 Dana Jacobsen
 ============================================================================*/
 
-/* Native worker calls into Perl's error/primality adapters need a separate
- * audit.  For now, enable this implementation only in the standalone host. */
-
 #include <pthread.h>
 
 typedef struct psiqs_pool_t psiqs_pool_t;

@@ -4,7 +4,7 @@
  * as siqs-check does; no production hooks, policies or binaries are changed.
  *
  * cc -std=c99 -O3 -march=native -falign-loops=32 -DPSIQS -pthread \
- *   -o siqs-sieve-bench tools/siqs-sieve-bench.c lanczos.c \
+ *   -o bench-sieve tools/siqs-sieve-bench.c lanczos.c \
  *   pr32_iter.c squfof126.c -lgmp -lm
  * Copyright (c) 2026 Dana Jacobsen. See LICENSE for redistribution terms.
  */
@@ -18,7 +18,7 @@
 #include <unistd.h>
 
 #if !defined(PSIQS)
-#error "Build siqs-sieve-bench with -DPSIQS -pthread"
+#error "Build bench-sieve with -DPSIQS -pthread"
 #endif
 #include "../ptypes.h"
 /* The production allocator is the sole source of balancing/activation math.
@@ -76,14 +76,14 @@ typedef struct {
 static double bench_wall(void) {
   struct timespec now;
   if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
-    croak("siqs-sieve-bench: clock_gettime failed: %s", strerror(errno));
+    croak("bench-sieve: clock_gettime failed: %s", strerror(errno));
   return (double)now.tv_sec + (double)now.tv_nsec / 1e9;
 }
 
 static double bench_cpu(void) {
   struct rusage usage;
   if (getrusage(RUSAGE_SELF, &usage) != 0)
-    croak("siqs-sieve-bench: getrusage failed: %s", strerror(errno));
+    croak("bench-sieve: getrusage failed: %s", strerror(errno));
   return (double)usage.ru_utime.tv_sec + (double)usage.ru_stime.tv_sec
        + ((double)usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1e6;
 }
@@ -151,7 +151,7 @@ static void bench_run_count(bench_pool_t *pool, uint32_t active,
   /* Serial screening does not wake the parked pool.  Threaded batches always
    * use its entire requested count; no partial-pool scheduling is needed. */
   if (active != 1U && active != pool->count)
-    croak("siqs-sieve-bench: invalid active worker count");
+    croak("bench-sieve: invalid active worker count");
   if (active > 1U) {
     pthread_mutex_lock(&pool->mutex);
     pool->iterations = iterations;
@@ -178,9 +178,9 @@ static void bench_run_count(bench_pool_t *pool, uint32_t active,
   for (i = 0; i < active; i++) {
     siqs_ctx_t *ctx = &pool->workers[i].prepared.ctx;
     if (pool->workers[i].completed_iterations != iterations)
-      croak("siqs-sieve-bench: wrong input scratch used by worker %u", i);
+      croak("bench-sieve: wrong input scratch used by worker %u", i);
     if (memcmp(ctx->sieve, pool->workers[i].reference, ctx->sieve_length) != 0)
-      croak("siqs-sieve-bench: sieve mismatch after timed run (worker %u)", i);
+      croak("bench-sieve: sieve mismatch after timed run (worker %u)", i);
     *checksum += pool->workers[i].checksum;
   }
 }
@@ -205,7 +205,7 @@ static void bench_configure(bench_pool_t *pool, bench_case_t *test) {
     siqs_block_workspace_allocate(ctx);
     siqs_run_sieve(ctx);
     if (memcmp(ctx->sieve, worker->reference, ctx->sieve_length) != 0)
-      croak("siqs-sieve-bench: blocked/unblocked mismatch (worker %u)", i);
+      croak("bench-sieve: blocked/unblocked mismatch (worker %u)", i);
     if (i == 0) {
       test->dense = ctx->block_prime_count;
       test->block = test->dense ? ctx->block_length : 0;
@@ -213,7 +213,7 @@ static void bench_configure(bench_pool_t *pool, bench_case_t *test) {
         ? (ctx->sieve_length - 1U) / test->block + 1U : 0;
     } else if (test->dense != ctx->block_prime_count ||
                test->block != (ctx->block_prime_count ? ctx->block_length : 0)) {
-      croak("siqs-sieve-bench: workers have different block geometry");
+      croak("bench-sieve: workers have different block geometry");
     }
   }
 }
@@ -223,10 +223,10 @@ static uint32_t bench_unsigned(const char *text, uint32_t maximum) {
   char *end;
   errno = 0;
   if (*text < '0' || *text > '9')
-    croak("siqs-sieve-bench: invalid unsigned value %s", text);
+    croak("bench-sieve: invalid unsigned value %s", text);
   value = strtoul(text, &end, 10);
   if (errno || *end || value > maximum)
-    croak("siqs-sieve-bench: invalid unsigned value %s", text);
+    croak("bench-sieve: invalid unsigned value %s", text);
   return (uint32_t)value;
 }
 
@@ -239,18 +239,18 @@ static uint32_t bench_sizes(const char *text, bench_case_t *cases) {
     char *end;
     uint32_t i, bytes;
     errno = 0;
-    if (*text < '0' || *text > '9') croak("siqs-sieve-bench: invalid size list");
+    if (*text < '0' || *text > '9') croak("bench-sieve: invalid size list");
     kib = strtoul(text, &end, 10);
     if (errno || (*end && *end != ',') ||
         (kib != 0 && (kib < 4 || kib > 1024)))
-      croak("siqs-sieve-bench: sizes must be 0 or 4..1024 KiB");
+      croak("bench-sieve: sizes must be 0 or 4..1024 KiB");
     bytes = (uint32_t)kib * 1024U;
     for (i = 0; i < count && cases[i].maximum != bytes; i++) { }
     if (i == count) {
-      if (count == BENCH_MAX_SIZES) croak("siqs-sieve-bench: too many sizes");
+      if (count == BENCH_MAX_SIZES) croak("bench-sieve: too many sizes");
       cases[count++].maximum = bytes;
     }
-    if (*end == ',' && end[1] == '\0') croak("siqs-sieve-bench: empty final size");
+    if (*end == ',' && end[1] == '\0') croak("bench-sieve: empty final size");
     text = *end ? end + 1 : end;
   }
   return count;
@@ -272,18 +272,18 @@ static void bench_write_result(FILE *tsv, const bench_pool_t *pool,
     test->blocks, test->dense, (unsigned long long)test->iterations,
     wall, cpu, wall / total * 1e6, cpu / total * 1e6,
     (unsigned long long)checksum);
-  if (fflush(tsv)) croak("siqs-sieve-bench: could not write results");
+  if (fflush(tsv)) croak("bench-sieve: could not write results");
 }
 
 static void bench_validate_input(mpz_t n, const char *number) {
   const char *p;
   for (p = number; *p; p++)
     if (*p < '0' || *p > '9')
-      croak("siqs-sieve-bench: input must be a positive decimal integer");
+      croak("bench-sieve: input must be a positive decimal integer");
   if (mpz_set_str(n, number, 10) != 0 || mpz_sizeinbase(n, 2) < 100U ||
       mpz_sizeinbase(n, 2) > MPU_SIQS_MAX_BITS || mpz_even_p(n) ||
       siqs_is_prob_prime(n) || mpz_perfect_power_p(n))
-    croak("siqs-sieve-bench: use an odd, non-power composite of 100..%u bits",
+    croak("bench-sieve: use an odd, non-power composite of 100..%u bits",
           (unsigned)MPU_SIQS_MAX_BITS);
 }
 
@@ -298,7 +298,7 @@ static bench_worker_t *bench_prepare_workers(bench_pool_t *pool, const mpz_t n) 
   siqs_factor_array_init(&factors, n);
   siqs_ctx_init(&master, n, n, &factors, NULL, 0);
   if (!siqs_ctx_allocate(&master))
-    croak("siqs-sieve-bench: input has a factor in its factor base; choose another input");
+    croak("bench-sieve: input has a factor in its factor base; choose another input");
   siqs_poly_init(&master, &dispatch);
   workers = (bench_worker_t *)siqs_calloc(pool->count, sizeof(*workers));
   gmp_printf("Input %Zd (%u bits)\n", n, master.params.bits);
@@ -315,7 +315,7 @@ static bench_worker_t *bench_prepare_workers(bench_pool_t *pool, const mpz_t n) 
     worker->index = i;
     psiqs_worker_init(&worker->prepared, &master, i);
     if (!psiqs_assign_family(&master, &dispatch, &worker->prepared, UINT32_MAX))
-      croak("siqs-sieve-bench: could not prepare distinct A families");
+      croak("bench-sieve: could not prepare distinct A families");
     siqs_first_B_and_roots(ctx, &worker->prepared.poly);
     siqs_set_family_sieve_initial(ctx);
     siqs_run_sieve(ctx);
@@ -339,15 +339,15 @@ static void bench_pool_start(bench_pool_t *pool) {
   pool->anchors = pool->workers;
   if (pthread_mutex_init(&pool->mutex, NULL) ||
       pthread_cond_init(&pool->work, NULL) || pthread_cond_init(&pool->done, NULL))
-    croak("siqs-sieve-bench: cannot initialize worker synchronization");
+    croak("bench-sieve: cannot initialize worker synchronization");
   for (i = 1; i < pool->count; i++)
     if (pthread_create(&pool->anchors[i].thread, NULL, bench_thread, &pool->anchors[i]))
-      croak("siqs-sieve-bench: cannot create all requested threads");
+      croak("bench-sieve: cannot create all requested threads");
 }
 
 static void bench_pool_select(bench_pool_t *pool, bench_worker_t *workers) {
   pthread_mutex_lock(&pool->mutex);
-  if (pool->pending != 0) croak("siqs-sieve-bench: cannot switch a running pool");
+  if (pool->pending != 0) croak("bench-sieve: cannot switch a running pool");
   pool->workers = workers;
   pthread_mutex_unlock(&pool->mutex);
 }
@@ -360,7 +360,7 @@ static void bench_pool_stop(bench_pool_t *pool) {
   pthread_mutex_unlock(&pool->mutex);
   for (i = 1; i < pool->count; i++)
     if (pthread_join(pool->anchors[i].thread, NULL))
-      croak("siqs-sieve-bench: join failed");
+      croak("bench-sieve: join failed");
   pthread_cond_destroy(&pool->done);
   pthread_cond_destroy(&pool->work);
   pthread_mutex_destroy(&pool->mutex);
@@ -378,7 +378,7 @@ static void bench_clear_workers(bench_worker_t *workers, uint32_t count) {
 #include "siqs-autotune.inc.c"
 
 static void bench_usage(void) {
-  puts("usage: siqs-sieve-bench [options] [INTEGER ...]\n"
+  puts("usage: bench-sieve [options] [INTEGER ...]\n"
     "  --threads N     Sieve workers (default 1; no automatic thread sweep).\n"
     "  --sizes LIST    Maxima in KiB (default 0,16,32,64; off always included).\n"
     "  --seconds S     Approximate seconds per measured batch (default 1).\n"
@@ -417,11 +417,11 @@ int SIQS_SIEVE_BENCH_MAIN(int argc, char **argv) {
     if (strcmp(option, "--autotune") == 0) { autotune = 1; continue; }
     if (*option != '-') {
       if ((uint32_t)number_seen == AUTOTUNE_MAX_INPUTS)
-        croak("siqs-sieve-bench: too many inputs");
+        croak("bench-sieve: too many inputs");
       numbers[number_seen++] = option;
       continue;
     }
-    if (++arg == argc) croak("siqs-sieve-bench: missing value for %s", option);
+    if (++arg == argc) croak("bench-sieve: missing value for %s", option);
     value = argv[arg];
     if (!strcmp(option, "--threads") || !strcmp(option, "-threads"))
       threads = bench_unsigned(value, PSIQS_MAX_THREADS);
@@ -435,30 +435,30 @@ int SIQS_SIEVE_BENCH_MAIN(int argc, char **argv) {
     else if (!strcmp(option, "--polynomials")) {
       fixed_options = 1;
       fixed_iterations = bench_unsigned(value, (uint32_t)BENCH_MAX_ITERATIONS);
-      if (!fixed_iterations) croak("siqs-sieve-bench: polynomials must be positive");
+      if (!fixed_iterations) croak("bench-sieve: polynomials must be positive");
     } else if (!strcmp(option, "--seconds")) {
       char *end;
       fixed_options = 1;
       errno = 0;
       seconds = strtod(value, &end);
       if (errno || *end || !(seconds > 0.0 && seconds <= 3600.0))
-        croak("siqs-sieve-bench: seconds must be in (0,3600]");
+        croak("bench-sieve: seconds must be in (0,3600]");
     } else if (!strcmp(option, "--work-seconds")) {
       char *end;
       errno = 0;
       work_seconds = strtod(value, &end);
       if (errno || *end || !(work_seconds >= 0.0 && work_seconds <= 60.0))
-        croak("siqs-sieve-bench: work-seconds must be in [0,60]");
-    } else croak("siqs-sieve-bench: unknown option %s", option);
+        croak("bench-sieve: work-seconds must be in [0,60]");
+    } else croak("bench-sieve: unknown option %s", option);
   }
   if (autotune && fixed_options)
-    croak("siqs-sieve-bench: autotune supplies its own seconds/repeat/polynomials");
+    croak("bench-sieve: autotune supplies its own seconds/repeat/polynomials");
   if (autotune && minimum != UINT32_MAX)
-    croak("siqs-sieve-bench: autotune retains the production activation threshold");
+    croak("bench-sieve: autotune retains the production activation threshold");
   if (!autotune && number_seen > 1)
-    croak("siqs-sieve-bench: supply only one input outside autotune mode");
-  if (!threads || !repeats) croak("siqs-sieve-bench: threads/repeat must be positive");
-  if (!*size_list) croak("siqs-sieve-bench: empty size list");
+    croak("bench-sieve: supply only one input outside autotune mode");
+  if (!threads || !repeats) croak("bench-sieve: threads/repeat must be positive");
+  if (!*size_list) croak("bench-sieve: empty size list");
   count = bench_sizes(size_list, cases);
   for (i = 0; i < count; i++) {
     cases[i].minimum = minimum == UINT32_MAX ? 5U * cases[i].maximum / 2U : minimum;
@@ -470,9 +470,9 @@ int SIQS_SIEVE_BENCH_MAIN(int argc, char **argv) {
   }
   if (output) {
     int fd = open(output, O_WRONLY | O_CREAT | O_EXCL, 0644);
-    if (fd < 0) croak("siqs-sieve-bench: cannot create %s: %s", output, strerror(errno));
+    if (fd < 0) croak("bench-sieve: cannot create %s: %s", output, strerror(errno));
     tsv = fdopen(fd, "w");
-    if (!tsv) croak("siqs-sieve-bench: fdopen failed: %s", strerror(errno));
+    if (!tsv) croak("bench-sieve: fdopen failed: %s", strerror(errno));
     if (autotune) fprintf(tsv, "stage\t");
     fprintf(tsv, "n\tbits\tmultiplier\td\tq\tfb_size\tsieve_bytes\trepeat\tthreads\tmax_bytes\tmin_length_bytes\tblock_bytes\tblocks\tdense_primes\titerations_per_worker\twall_seconds\tcpu_seconds\twall_us_per_poly\tcpu_us_per_poly\tchecksum\n");
     fflush(tsv);
@@ -482,7 +482,7 @@ int SIQS_SIEVE_BENCH_MAIN(int argc, char **argv) {
 
   if (autotune) {
     autotune_run(numbers, (uint32_t)number_seen, threads, cases, count, tsv, work_seconds);
-    if (tsv && fclose(tsv)) croak("siqs-sieve-bench: could not close results");
+    if (tsv && fclose(tsv)) croak("bench-sieve: could not close results");
 
     return 0;
   }
@@ -521,7 +521,7 @@ int SIQS_SIEVE_BENCH_MAIN(int argc, char **argv) {
       {
         double estimate = ceil((double)iterations * seconds / wall);
         if (!(estimate >= 1.0 && estimate <= (double)BENCH_MAX_ITERATIONS))
-          croak("siqs-sieve-bench: calibrated work outside supported range");
+          croak("bench-sieve: calibrated work outside supported range");
         cases[i].iterations = (uint64_t)estimate;
       }
     }
@@ -579,7 +579,7 @@ if (short_runs)
   bench_pool_stop(&pool);
   bench_clear_workers(pool.workers, pool.count);
   for (i = 0; i < count; i++) { free(cases[i].wall_per_poly); free(cases[i].cpu_per_poly); }
-  if (tsv && fclose(tsv)) croak("siqs-sieve-bench: could not close results");
+  if (tsv && fclose(tsv)) croak("bench-sieve: could not close results");
 
   mpz_clear(n);
   return 0;

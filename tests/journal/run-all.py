@@ -92,6 +92,6 @@ data=path.read_bytes()
 step('wide-header-replay',[str(RESULTS/'journal-attempts'),str(path),'--wide'])
 assert path.read_bytes()==data
 step('wide-header-info',[sys.executable,str(BUILD/'tools/journal-info.py'),'--json',str(path)])
-step('existing-check-siqs',['make','check-siqs'],BUILD)
+step('existing-check-siqs',['make','check'],BUILD)
 step('journal-info',[sys.executable,'-u',str(FIXTURES/'test-journal-info.py')])
 print('All journal, recovery and existing SIQS checks passed.',flush=True)

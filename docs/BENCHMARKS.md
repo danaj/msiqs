@@ -34,7 +34,8 @@ but needed two minor changes to compile on macOS.
   with highly optimized x86 sieving and NFS workflows as well as SIQS.
   It has been a go-to tool for high performance, high reliability,  and
   large factoring work since 2009.  It uses highly optimized asm vector
-  kernels on x86, but has no ARM (NEON) kernels.
+  kernels on x86, but the main branch which was benchmarked has no ARM NEON
+  kernels.  The in-progress L2sieve branch looks very promising for the future.
 
 - [msieve](https://sourceforge.net/projects/msieve/), first released in 2004,
   is a complete library and command-line tool, with both QS and NFS work
@@ -145,6 +146,13 @@ graph -- the ratio panel makes things easier to see.  Pari is quite usable
 across much of the range, though its times rise at larger sizes (the source
 has a comment saying sizes over 91 digits are "untested").  YAFU uses its
 generic sieve core on the Mac.
+
+On 2 Nov 2026, I made preliminary comparisons using a few inputs between
+190 and 330 bits. YAFU’s L2sieve branch (d514d1c) adds a new sieving
+structure and NEON support, and was much faster than the generic build
+used in the graphs.  In these sparse spot checks, YAFU took roughly twice
+as long as msiqs below 250 bits, and about 1.5 times as long from 250 to
+330 bits.  These measurements are not included in the graphs.
 
 
 ### Single thread ARM peak memory
@@ -265,8 +273,8 @@ buckets, while MPU used direct sieve kernels.  The different parameter
 choices also affected the amount of work.
 
 I’ve shared these profiling results with Ben Buhrow.  His work on YAFU has
-been an important source of ideas for MPU-SIQS, and I’m looking forward to
-seeing what comes next.
+been an important source of ideas for MPU-SIQS.  He is currently (1 Nov 2026)
+working on new sieving code as well as ARM64 kernels.
 
 I also note that over a year ago, a
 [post on mersenneforum](https://www.mersenneforum.org/node/1079832#post1079832)
