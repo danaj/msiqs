@@ -8,10 +8,18 @@ to the original repositories. Unrelated commits and Perl release tags were
 not imported. Historical snapshots are not promised to build independently.
 
 The current project is MIT licensed. Preserved historical revisions retain
-their original copyright and license notices. In particular, the first
-Lanczos import (original GMP revision acde10f0) carried FLINT's GPL v2-or-later
-notice; the replacement (ba25022) is Dana Jacobsen's independent solver.
+their original copyright and license notices. The old FLINT-derived Lanczos
+source and header are deliberately excluded from this repository's history,
+including their intermediate versions. The independent solver's history is
+retained from its introduction as `nlanczos.c` (original GMP revision
+4c12e554), through its replacement of the old solver (ba25022), and onward.
 The current source documents Montgomery's algorithm and msieve's influence.
+
+The original module briefly contained the FLINT-derived solver, but did not
+release it. Removing that code from this extracted history does not change
+its upstream history or the acknowledgements in the current implementation.
+The commit maps above account for this exclusion; historical snapshots that
+used the excluded solver will not contain that source or its header.
 
 SQUFOF acknowledges Ben Buhrow's racing implementation, distributed with
 an explicit public-domain dedication in YAFU, and earlier work by Jason
