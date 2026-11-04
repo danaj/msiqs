@@ -7,6 +7,7 @@
 #define MSIQS_UTIL_128_C
 #include "ptypes.h"
 #include <math.h>
+#include <stdbool.h>
 #if HAVE_UINT128
 #ifndef M_LN2
 #define M_LN2 0.69314718055994530942

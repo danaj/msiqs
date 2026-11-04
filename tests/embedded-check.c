@@ -1,4 +1,15 @@
+#include "../embedded/tinyecm64.h"
+#include <stdlib.h>
+static int cofactor_miss_ecm;
+static unsigned int cofactor_ecm_calls;
+static uint64_t embedded_check_ecm(uint64_t n, int try_small, uint64_t *state) {
+  cofactor_ecm_calls++;
+  if (try_small != 0 || *state != n) exit(24);
+  return cofactor_miss_ecm ? 0 : tinyecm64(n, try_small, state);
+}
+#define tinyecm64 embedded_check_ecm
 #include "../embedded/siqs.c"
+#undef tinyecm64
 #include <stdio.h>
 static void check_lanczos(void) {
   unsigned long rows=2000,cols=2064,c,r;int mode;
@@ -28,8 +39,41 @@ static void check_lanczos(void) {
   free(columns);free(parity);
   puts("PASS embedded Lanczos: normal/wide sparse solvers, independent GF(2) verification");
 }
+static void check_cofactors(void) {
+  siqs_ctx_t ctx;
+  siqs_factor_array_t result;
+  mpz_t n;
+  uint64_t input, a, b;
+  unsigned int mode;
+  int accepted;
+  mpz_init(n);
+  for (mode = 0; mode < 3; mode++) {
+    memset(&ctx, 0, sizeof(ctx)); memset(&result, 0, sizeof(result));
+    ctx.result = &result;
+    ctx.params.bits = mode == 2 ? 64 : 300;
+    ctx.params.max_large_primes = 2;
+    ctx.params.smooth_bound = ctx.params.large_prime_bound = UINT64_MAX;
+    ctx.largest_fb_prime = 100;
+    cofactor_miss_ecm = mode != 0;
+    cofactor_ecm_calls = 0;
+    mpz_set_str(n, mode == 0 ? "18446743979220271189" : "47053", 10);
+    accepted = siqs_resolve_cofactor(&ctx, n, &a, &b);
+    if (cofactor_ecm_calls != 1 || ctx.split_attempts != 1 || ctx.split_rejected != 0)
+      exit(25);
+    if (mode < 2) {
+      if (!accepted || !siqs_mpz_to_u64(n, &input) || a <= 1 || b <= 1 ||
+          input % a != 0 || input / a != b || ctx.split_fail != 0) exit(26);
+      if (ctx.split_ecm != (mode == 0) || ctx.split_siqs != (mode == 1)) exit(27);
+    } else if (accepted || a != 1 || b != 1 || ctx.split_fail != 1 ||
+               ctx.split_ecm != 0 || ctx.split_siqs != 0) exit(28);
+  }
+  cofactor_miss_ecm = 0;
+  mpz_clear(n);
+  puts("PASS embedded SIQS: 64-bit ECM, input-derived seeds, quiet SIQS recovery and recursion guard");
+}
 int main(void) {
   check_lanczos();
+  check_cofactors();
   const char *inputs[]={"1","2","77","1000000016000000063",
     "22095311209999409685885162322219",
     "713623846352979940529142984724747568191373381"};

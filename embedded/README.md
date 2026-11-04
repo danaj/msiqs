@@ -32,7 +32,7 @@ very easy to use the main project code with `planczos_inc.c` added.
 
 tinysiqs128.c:  tinysiqs128.[ch], ptypes.h, util\_128.c, LICENSE.
 
-siqs.c:  siqs\*.[ch], mont64.h, ptypes.h, pr32\_iter.[ch], squfof126.[ch],
+siqs.c:  siqs\*.[ch], mont64.h, ptypes.h, pr32\_iter.[ch], tinyecm64.[ch],
          lanczos.[ch], LICENSE.
 
 lanczos.c:  lanczos.[ch], ptypes.h, LICENSE.
@@ -44,13 +44,13 @@ These identify the last main-project work incorporated into each edition.
 Commit identifiers refer to the preserved history in this repository.
 
 - `tinysiqs128.c`: SIQS optimizations imported on 2026-10-09 (`5423b1e`), plus the 2026-10-22 portability fix (`57f675f`).
-- `siqs.c`: adapted from main msiqs on 2026-11-02 (`324bd2f`).
+- `siqs.c`: adapted from main msiqs on 2026-11-02 (`324bd2f`), with TinyECM64 cofactor splitting ported on 2026-11-04.
 - `lanczos.c`: adapted from main msiqs on 2026-11-02 (`324bd2f`).
 
 
 ## Serial SIQS using GMP
 
-Compile siqs.c, lanczos.c, pr32\_iter.c, and squfof126.c, linking GMP and libm.
+Compile siqs.c, lanczos.c, pr32\_iter.c, and tinyecm64.c, linking GMP and libm.
 Keep their headers, ptypes.h, mont64.h, siqs\_choose\_inc.c, and
 siqs\_sieve\_kernel\_inc.c alongside them. The implementation includes are not
 separate compilation units. No build-mode defines are required.
@@ -74,7 +74,7 @@ exceptions.
 A host with main() can be compiled from the repository root:
 
 ```sh
-cc -std=c99 -O3 -falign-loops=32 -Iembedded -o my-factor my-factor.c embedded/siqs.c embedded/lanczos.c embedded/pr32_iter.c embedded/squfof126.c -lgmp -lm
+cc -std=c99 -O3 -falign-loops=32 -Iembedded -o my-factor my-factor.c embedded/siqs.c embedded/lanczos.c embedded/pr32_iter.c embedded/tinyecm64.c -lgmp -lm
 ```
 
 

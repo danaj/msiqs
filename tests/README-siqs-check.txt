@@ -31,7 +31,7 @@ be installed or built. Use --keep to retain the binary.
 Direct build without Perl or a generated Makefile, from the repository root:
 
   cc -std=c99 -O3 -o /tmp/siqs-check tests/siqs-check.c \
-    pr32_iter.c squfof126.c -lgmp -lm
+    pr32_iter.c tinyecm64.c -lgmp -lm
   /tmp/siqs-check --suite sieve
   /tmp/siqs-check --extended --verbose
 
@@ -66,12 +66,14 @@ Arithmetic and storage coverage does not establish practical 512-bit
 factoring support. See misc/siqs-tuning/audit512-20261011/REPORT.txt for the
 checked envelope, remaining resource limits and validation scope.
 The cofactors suite checks method counters, failed versus
-rejected splits, 55--59/64-bit crossover cases, bounded nesting, quiet output
+rejected splits, 55--59/64-bit residuals, bounded nesting, quiet output
 and concurrent calls. It also checks the internal largest-two helper on
 multi-factor/repeated partitions, wider inputs, and uint64_t overflow, plus
-low-bit SIQS recovery and terminal splitter misses: a miss drops the relation,
+ECM at every residual size, input-derived curve seeds, and forced ECM misses
+followed by quiet SIQS recovery. A terminal splitter miss drops the relation,
 increments the failure counter (not the policy-rejection counter), and reports
-the residual only when verbosity is enabled. No rho fallback is required.
+the residual only when verbosity is enabled. Nested inputs of at most 64 bits
+cannot enter SIQS again; a failed ECM call drops that candidate.
 --verbose reports individual polynomial/matrix fixtures. New suites can
 be registered without creating separate executables or a large framework.
 

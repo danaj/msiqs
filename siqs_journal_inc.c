@@ -441,7 +441,7 @@ void gmp_siqs_journal_close(siqs_journal_t *j) {
  X(sieve_hit_bound_nominal) X(sieve_hit_residual_multiplier) X(sieve_hit_bound) X(log_scale)
 #define SJ_COUNTERS(X) \
  X(total_candidates) X(split_attempts) X(split_square) X(split_siqs) \
- X(split_squfof) X(split_rho) X(split_fail) X(split_rejected)
+ X(split_squfof) X(split_ecm) X(split_fail) X(split_rejected)
 static void sj_context(siqs_ctx_t *ctx, sj_buffer *b) {
   uint32_t i; size_t name = strlen(ctx->params.policy_name);
   if (sizeof(double) != sizeof(uint64_t) || DBL_MANT_DIG != 53 || DBL_MAX_EXP != 1024)

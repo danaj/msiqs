@@ -13,7 +13,7 @@
  *   Apple M1 Pro     1.7   3.1   6.5  13.8  29.8
  *   AMD EPYC 9B45    1.8   4.6   9.6  20.0  43.1
  *
- * One thread, try_small=false.  Clang 21 (ARM), GCC 13 (AMD),
+ * One thread, try_small=0.  Clang 21 (ARM), GCC 13 (AMD),
  * -O3 -march=native -falign-loops=32.  Each machine had a total of 11
  * misses in 1.5 million attempts.  Misses included; no fallback timed.
  *
@@ -1157,7 +1157,7 @@ enum { MAX_MAIN_CURVES = 46, MAX_PREFIX_CURVES = 2, RESCUE_CURVES = 8 };
  * regrouping their existing final two scalar curves. */
 static NOINLINE uint64_t rescue_curves(const mont64_t *ctx, unsigned b1,
                                       const uint16_t *seen, unsigned nseen,
-                                      uint64_t *state, bool four) {
+                                      uint64_t *state, int four) {
   unsigned next_b1 = b1;
   for (unsigned j = 0; j < sizeof(policy) / sizeof(policy[0]); j++) {
     if (policy[j].b1 >= 70 && policy[j].b1 > b1) {
@@ -1189,7 +1189,7 @@ static NOINLINE uint64_t rescue_curves(const mont64_t *ctx, unsigned b1,
 }
 
 static uint64_t factor_with_policy(uint64_t n, unsigned b1, unsigned count,
-                                   bool try_small, bool four, uint64_t *rng_state) {
+                                   int try_small, int four, uint64_t *rng_state) {
   uint64_t state = splitmix(rng_state);
   uint16_t sigmas[MAX_MAIN_CURVES + MAX_PREFIX_CURVES];
   mont64_t ctx;
@@ -1197,7 +1197,7 @@ static uint64_t factor_with_policy(uint64_t n, unsigned b1, unsigned count,
   scalar_workspace ws;
   /* Probe cheaply for small factors before paying for a main batch. Above
    * B1=27, add one scalar B1=70 curve. Both are additional
-   * to the main and rescue budgets; try_small=false skips them entirely. */
+   * to the main and rescue budgets; try_small=0 skips them entirely. */
   unsigned prefix = try_small ? 1 + (b1 > 27) : 0;
   for (unsigned i = 0; i < prefix; i++) {
     next_sigma(sigmas, i, &state);
@@ -1216,7 +1216,7 @@ static uint64_t factor_with_policy(uint64_t n, unsigned b1, unsigned count,
       if (f) return f;
     }
 #else
-  four = false;
+  four = 0;
 #endif
   for (; i < count; i++) {
     next_sigma(sigmas, prefix + i, &state);
@@ -1226,7 +1226,7 @@ static uint64_t factor_with_policy(uint64_t n, unsigned b1, unsigned count,
   }
   return rescue_curves(&ctx, b1, sigmas, prefix + count, &state, four);
 }
-uint64_t tinyecm64(uint64_t n, bool try_small, uint64_t *rng_state) {
+uint64_t tinyecm64(uint64_t n, int try_small, uint64_t *rng_state) {
   if (n < 4) return 0;
   if (!(n & 1)) return 2;
   unsigned bits = 0;

@@ -7,15 +7,17 @@ Build from the repository root:
   make bench-solvers
 or compile directly:
   cc -std=c99 -O3 -march=native -falign-loops=32 -UPSIQS -o bench-solvers \
-    tools/siqs-la-bench.c siqs.c pr32_iter.c squfof126.c -lgmp -lm
+    tools/siqs-la-bench.c siqs.c pr32_iter.c tinyecm64.c -lgmp -lm
 
 Run on a QUIET machine, with unrelated factoring/benchmark queues paused:
   ./bench-solvers --repeats 6 < inputs.txt > crossover.tsv
 
 Inputs are positive decimal composites, one per line; blank lines and comment
-lines are allowed. Balanced semiprimes roughly 130..190 bits are useful around
-the current 1536-column crossover. The tool rejects inputs above 245 bits to
-avoid capturing recursive cofactor SIQS calls from the 2LP policies. It uses
+lines are allowed. Balanced semiprimes roughly 200..220 bits are useful for
+collecting batch matrices. Smaller inputs may be solved entirely by BIDS and
+produce no timing rows. If no matrix falls within the selected column range,
+the tool exits with status 1. The tool rejects inputs above 245 bits to avoid
+capturing recursive cofactor SIQS calls from the 2LP policies. It uses
 the ordinary serial SIQS entry point with current production parameters.
 No factor-base/interval settings or solver policy are changed.
 

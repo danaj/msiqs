@@ -2,7 +2,7 @@
  *
  * Direct build from the repository root (GMP required, Perl not required):
  *   cc -O3 -o /tmp/siqs-check tests/siqs-check.c \
- *     pr32_iter.c squfof126.c -lgmp -lm
+ *     pr32_iter.c tinyecm64.c -lgmp -lm
  *   /tmp/siqs-check --suite sieve
  *
  * Include the current implementation to test its private interfaces without
@@ -37,7 +37,7 @@ static uint32_t check_fb_prime_next(pr32_iter_t *iter) {
 #include SIQS_CHECK_SOURCE
 #undef pr32_iter_next
 #include "../mont64.h"
-#undef squfof126
+#undef tinyecm64
 #undef mpz_probab_prime_p
 #define mpz_probab_prime_p check_real_prob_prime
 #undef malloc

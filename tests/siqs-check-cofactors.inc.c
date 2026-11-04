@@ -12,7 +12,7 @@ static void cofactor_context(siqs_ctx_t *ctx, siqs_factor_array_t *result) {
 }
 static void cofactor_counts(const siqs_ctx_t *ctx) {
   CHECK(ctx->split_attempts == ctx->split_square + ctx->split_siqs +
-        ctx->split_squfof + ctx->split_rho + ctx->split_fail + ctx->split_rejected);
+        ctx->split_squfof + ctx->split_ecm + ctx->split_fail + ctx->split_rejected);
 #ifdef SIQS_TIMING
   CHECK(ctx->result->cofactor_calls == ctx->split_attempts);
   CHECK(ctx->result->primality_composite >= ctx->split_attempts);
@@ -56,22 +56,22 @@ static void cofactor_classification(void) {
   CHECK(ctx.split_square == 1);
   cofactor_context(&ctx, &result);
   CHECK(cofactor_resolve(&ctx, "10403")); /* 101*103 */
-  CHECK(ctx.split_squfof == 1);
+  CHECK(ctx.split_ecm == 1 && ctx.split_squfof == 0);
   cofactor_context(&ctx, &result); ctx.params.large_prime_bound = 103;
   CHECK(!cofactor_resolve(&ctx, "10807")); /* 101*107: split, LP-invalid */
-  CHECK(ctx.split_rejected == 1 && ctx.split_fail == 0 && ctx.split_squfof == 0);
+  CHECK(ctx.split_rejected == 1 && ctx.split_fail == 0 && ctx.split_ecm == 0);
   cofactor_context(&ctx, &result); ctx.params.large_prime_bound = 100;
   CHECK(!cofactor_resolve(&ctx, "10201"));
   CHECK(ctx.split_rejected == 1 && ctx.split_square == 0);
   cofactor_context(&ctx, &result);
   CHECK(!cofactor_resolve(&ctx, "1113121")); /* 101*103*107, not a prime pair */
   CHECK(ctx.split_rejected == 1);
-  cofactor_miss_squfof = 1;
+  cofactor_miss_ecm = 1;
   cofactor_miss_siqs = 1;
   cofactor_context(&ctx, &result);
   CHECK(!cofactor_resolve(&ctx, "47053")); /* 211*223, beyond inner trial limit */
-  CHECK(ctx.split_fail == 1 && ctx.split_rejected == 0 && ctx.split_rho == 0);
-  cofactor_miss_squfof = cofactor_miss_siqs = 0;
+  CHECK(ctx.split_fail == 1 && ctx.split_rejected == 0 && ctx.split_ecm == 0);
+  cofactor_miss_ecm = cofactor_miss_siqs = 0;
   cofactor_context(&ctx, &result);
   CHECK(cofactor_resolve(&ctx, "1") && ctx.split_attempts == 0);
   CHECK(!cofactor_resolve(&ctx, "18446744073709551616") && ctx.split_attempts == 0);
@@ -83,7 +83,9 @@ static void cofactor_classification(void) {
 }
 
 static void cofactor_trace_reset(void) {
-  cofactor_squfof_calls = cofactor_prime_calls = 0;
+  cofactor_ecm_calls = cofactor_prime_calls = 0;
+  cofactor_ecm_input = cofactor_ecm_seed = 0;
+  cofactor_ecm_try_small = -1;
 }
 
 static void cofactor_lp_ceiling(void) {
@@ -478,44 +480,48 @@ static void cofactor_q2_geometry_recovery(void) {
 static void cofactor_cascade(void) {
   siqs_ctx_t ctx;
   siqs_factor_array_t result;
+  uint64_t cofactor_state;
   case_name = "cofactor-preferred-method-and-fallback-order";
   cofactor_trace = 1;
   cofactor_trace_reset(); cofactor_context(&ctx, &result);
+  cofactor_state = ctx.cofactor_rng.state;
   CHECK(cofactor_resolve(&ctx, "47053"));
-  CHECK(ctx.split_squfof == 1 && cofactor_squfof_calls == 1 &&
+  CHECK(ctx.split_ecm == 1 && ctx.split_squfof == 0 && cofactor_ecm_calls == 1 &&
         cofactor_prime_calls == 0);
-  cofactor_miss_squfof = 1;
+  CHECK(cofactor_ecm_input == 47053 && cofactor_ecm_seed == 47053 &&
+        cofactor_ecm_try_small == 0 && ctx.cofactor_rng.state == cofactor_state);
+  cofactor_miss_ecm = 1;
   cofactor_trace_reset(); cofactor_context(&ctx, &result);
   CHECK(cofactor_resolve(&ctx, "47053"));
-  CHECK(cofactor_squfof_calls == 1);
-  CHECK(ctx.split_siqs == 1 && cofactor_prime_calls != 0);
+  CHECK(cofactor_ecm_calls == 1);
+  CHECK(ctx.split_siqs == 1 && ctx.split_ecm == 0 && cofactor_prime_calls != 0);
   cofactor_miss_siqs = 1;
   cofactor_trace_reset(); cofactor_context(&ctx, &result);
   CHECK(!cofactor_resolve(&ctx, "47053"));
-  CHECK(ctx.split_fail == 1 && ctx.split_rejected == 0 && ctx.split_rho == 0 &&
-        cofactor_squfof_calls == 1);
-  CHECK(cofactor_prime_calls == 1);
+  CHECK(ctx.split_fail == 1 && ctx.split_rejected == 0 && ctx.split_ecm == 0 &&
+        cofactor_ecm_calls == 1 && cofactor_prime_calls == 1);
 
-  /* Above the crossover, a SIQS miss is terminal: no SQUFOF retry. */
-  cofactor_miss_squfof = 0;
+  /* ECM is tried at every residual size; a later SIQS miss is terminal. */
   cofactor_trace_reset(); cofactor_context(&ctx, &result);
   ctx.largest_fb_prime = 397; ctx.params.large_prime_bound = UINT64_MAX;
   /* 1009 * 9007199254740881: both prime; skip the inner trial limit. */
   CHECK(!cofactor_resolve(&ctx, "9088264048033548929"));
-  CHECK(ctx.split_fail == 1 && ctx.split_rejected == 0 && ctx.split_rho == 0 &&
-        cofactor_squfof_calls == 0 && cofactor_prime_calls == 1);
+  CHECK(ctx.split_fail == 1 && ctx.split_rejected == 0 && ctx.split_ecm == 0 &&
+        cofactor_ecm_calls == 1 && cofactor_prime_calls == 1);
+  cofactor_miss_ecm = 0;
   cofactor_trace_reset(); cofactor_context(&ctx, &result); ctx.params.bits = 64;
   ctx.largest_fb_prime = 397; ctx.params.large_prime_bound = UINT64_MAX;
   CHECK(cofactor_resolve(&ctx, "9088264048033548929"));
-  CHECK(ctx.split_siqs == 0 && cofactor_squfof_calls == 1 && cofactor_prime_calls == 0);
-  /* A nested-size input cannot re-enter SIQS even when SQUFOF misses. */
-  cofactor_miss_squfof = 1;
+  CHECK(ctx.split_ecm == 1 && ctx.split_siqs == 0 && ctx.split_squfof == 0 &&
+        cofactor_ecm_calls == 1 && cofactor_prime_calls == 0);
+  /* A nested-size input cannot re-enter SIQS even when ECM misses. */
+  cofactor_miss_ecm = 1;
   cofactor_trace_reset(); cofactor_context(&ctx, &result); ctx.params.bits = 64;
   CHECK(!cofactor_resolve(&ctx, "47053"));
-  CHECK(ctx.split_fail == 1 && ctx.split_rejected == 0 &&
-        cofactor_squfof_calls == 1 && cofactor_prime_calls == 0);
-  cofactor_miss_siqs = cofactor_miss_squfof = cofactor_trace = 0;
-  puts("PASS cofactors: SQUFOF/SIQS crossover, low-bit SIQS recovery, terminal misses, and recursion guard");
+  CHECK(ctx.split_fail == 1 && ctx.split_rejected == 0 && ctx.split_ecm == 0 &&
+        cofactor_ecm_calls == 1 && cofactor_prime_calls == 0);
+  cofactor_miss_siqs = cofactor_miss_ecm = cofactor_trace = 0;
+  puts("PASS cofactors: ECM at all sizes, SIQS recovery, terminal misses, input-derived seeds, and recursion guard");
 }
 #ifndef _WIN32
 static void cofactor_miss_notice(void) {
@@ -524,7 +530,7 @@ static void cofactor_miss_notice(void) {
   siqs_factor_array_t result;
   mpz_t n;
   case_name = "cofactor-siqs-miss-diagnostic";
-  cofactor_miss_squfof = cofactor_miss_siqs = 1;
+  cofactor_miss_ecm = cofactor_miss_siqs = 1;
   mpz_init_set_ui(n, 47053);
   for (verbose = 0; verbose <= 1; verbose++) {
     FILE *capture = tmpfile();
@@ -539,7 +545,7 @@ static void cofactor_miss_notice(void) {
     fflush(stderr);
     CHECK(dup2(saved_stderr, STDERR_FILENO) >= 0); close(saved_stderr);
     CHECK(!accepted && ctx.split_fail == 1 && ctx.split_rejected == 0 &&
-          ctx.split_rho == 0 && a == 1 && b == 1);
+          ctx.split_ecm == 0 && a == 1 && b == 1);
     cofactor_counts(&ctx);
     rewind(capture);
     if (verbose) {
@@ -550,7 +556,7 @@ static void cofactor_miss_notice(void) {
     fclose(capture);
   }
   mpz_clear(n);
-  cofactor_miss_squfof = cofactor_miss_siqs = 0;
+  cofactor_miss_ecm = cofactor_miss_siqs = 0;
   puts("PASS cofactors: SIQS miss drops the relation, reports residual at verbose level 1+, and stays quiet at level 0");
 }
 #endif
@@ -580,9 +586,9 @@ static void cofactor_nested_case(uint32_t bits) {
     CHECK(a > ctx.largest_fb_prime && b > ctx.largest_fb_prime);
     CHECK(input % a == 0 && input / a == b);
     cofactor_counts(&ctx);
-    if (bits > 64 && mpz_sizeinbase(n, 2) >= 56U)
-      CHECK(ctx.split_siqs == 1);
-    else if (bits <= 64) CHECK(ctx.split_siqs == 0);
+    if (cofactor_miss_ecm) CHECK(ctx.split_siqs == 1 && ctx.split_ecm == 0);
+    else CHECK(ctx.split_ecm == 1 && ctx.split_siqs == 0);
+    CHECK(ctx.split_squfof == 0);
     mpz_clear(n);
   }
 }
@@ -939,14 +945,20 @@ static void suite_cofactors(void) {
 #endif
   cofactor_siqs_helper();
   case_name = "nested-siqs-ownership-reentrancy-and-quiet-output";
-  cofactor_nested_case(380);
+  cofactor_miss_ecm = 1;
+  cofactor_nested_case(380); /* Force the real quiet SIQS backup at every size. */
+  cofactor_miss_ecm = 0;
   cofactor_nested_case(64); /* Outer-input guard prohibits a second SIQS level. */
 #ifdef PSIQS
   {
     pthread_t threads[4];
-    unsigned int i;
-    for (i = 0; i < 4; i++) CHECK(pthread_create(&threads[i], NULL, cofactor_thread, NULL) == 0);
-    for (i = 0; i < 4; i++) CHECK(pthread_join(threads[i], NULL) == 0);
+    unsigned int i, miss;
+    for (miss = 0; miss <= 1; miss++) {
+      cofactor_miss_ecm = (int)miss; /* Read-only until every thread joins. */
+      for (i = 0; i < 4; i++) CHECK(pthread_create(&threads[i], NULL, cofactor_thread, NULL) == 0);
+      for (i = 0; i < 4; i++) CHECK(pthread_join(threads[i], NULL) == 0);
+    }
+    cofactor_miss_ecm = 0;
   }
 #endif
   CHECK(verbose_level == 5);

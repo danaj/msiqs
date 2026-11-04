@@ -14,7 +14,7 @@ with tempfile.TemporaryDirectory(prefix='msiqs-embedded-') as tmp:
     test('tiny',['tests/tiny-check.c','embedded/tinysiqs128.c'],['-lm'])
     test('tiny-no128',['tests/tiny-check.c','embedded/tinysiqs128.c'],['-lm'],['-DHAVE_UINT128=0'])
     test('native128',['tests/native128-check.c'],['-lgmp','-lm'])
-    sources=['tests/embedded-check.c','embedded/lanczos.c','embedded/pr32_iter.c','embedded/squfof126.c']
+    sources=['tests/embedded-check.c','embedded/lanczos.c','embedded/pr32_iter.c','embedded/tinyecm64.c']
     test('serial',sources,['-lgmp','-lm'])
     test('serial-no128',sources,['-lgmp','-lm'],['-DHAVE_UINT128=0'])
 print('Embedded checks: all enabled checks passed.')

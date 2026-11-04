@@ -92,7 +92,7 @@ static void worker_assert_buffer_cleared(const psiqs_worker_t *worker) {
   const siqs_ctx_t *ctx = &worker->ctx;
   CHECK(ctx->raw_count == 0 && ctx->total_candidates == 0 && ctx->split_attempts == 0);
   CHECK(ctx->split_square == 0 && ctx->split_siqs == 0 &&
-        ctx->split_squfof == 0 && ctx->split_rho == 0 &&
+        ctx->split_squfof == 0 && ctx->split_ecm == 0 &&
         ctx->split_fail == 0 && ctx->split_rejected == 0);
 #ifdef SIQS_TIMING
   CHECK(worker->result.cofactor_time == 0 && worker->result.cofactor_calls == 0);
@@ -426,13 +426,13 @@ static void worker_merge_ownership(void) {
   siqs_store_raw(&a.ctx, source);
   a.ctx.total_candidates = 7; a.ctx.split_attempts = 21;
   a.ctx.split_square = 1; a.ctx.split_siqs = 2; a.ctx.split_squfof = 3;
-  a.ctx.split_rho = 4; a.ctx.split_fail = 5; a.ctx.split_rejected = 6;
+  a.ctx.split_ecm = 4; a.ctx.split_fail = 5; a.ctx.split_rejected = 6;
   psiqs_merge_worker(&master, &a);
   CHECK(master.raw_count == 1 && master.raw[0] != source);
   CHECK(a.ctx.raw_arena.current == block); worker_assert_buffer_cleared(&a);
   CHECK(master.total_candidates == 7 && master.split_attempts == 21);
   CHECK(master.split_square == 1 && master.split_siqs == 2 &&
-        master.split_squfof == 3 && master.split_rho == 4 &&
+        master.split_squfof == 3 && master.split_ecm == 4 &&
         master.split_fail == 5 && master.split_rejected == 6);
   f.row = 2;
   siqs_store_raw(&b.ctx, relation_raw(&b.ctx, 1, 11, &f, 1));

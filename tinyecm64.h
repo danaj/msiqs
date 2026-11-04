@@ -5,11 +5,10 @@
 #ifndef TINYECM64_H
 #define TINYECM64_H
 #include <stdint.h>
-#include <stdbool.h>
 /* Return a proper divisor or zero after a finite main budget and rescue.
  * For odd n>3, advance *rng_state once and use a private stream for the
  * curves.  Zero is a valid seed; the pointer must be nonnull.
- * try_small adds a short small-factor prefix, not trial division.
+ * Nonzero try_small adds a short small-factor prefix, not trial division.
  * All mutable state is local.  Callers retain their own fallback policy. */
-uint64_t tinyecm64(uint64_t n, bool try_small, uint64_t *rng_state);
+uint64_t tinyecm64(uint64_t n, int try_small, uint64_t *rng_state);
 #endif

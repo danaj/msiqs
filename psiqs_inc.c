@@ -158,7 +158,7 @@ static void psiqs_merge_worker(siqs_ctx_t *master, psiqs_worker_t *worker) {
   master->split_square += ctx->split_square;
   master->split_siqs += ctx->split_siqs;
   master->split_squfof += ctx->split_squfof;
-  master->split_rho += ctx->split_rho;
+  master->split_ecm += ctx->split_ecm;
   master->split_fail += ctx->split_fail;
   master->split_rejected += ctx->split_rejected;
 #ifdef SIQS_TIMING
@@ -176,7 +176,7 @@ static void psiqs_merge_worker(siqs_ctx_t *master, psiqs_worker_t *worker) {
   ctx->split_square = 0;
   ctx->split_siqs = 0;
   ctx->split_squfof = 0;
-  ctx->split_rho = 0;
+  ctx->split_ecm = 0;
   ctx->split_fail = 0;
   ctx->split_rejected = 0;
   /* A polynomial zero can discover a divisor without emitting a relation.

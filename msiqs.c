@@ -4,7 +4,7 @@
 
   Direct build from the repository root:
 
-    cc -std=c99 -O3 -march=native -falign-loops=32  -DPSIQS -pthread  -o msiqs  msiqs.c siqs.c lanczos.c pr32_iter.c squfof126.c  -lgmp -lm
+    cc -std=c99 -O3 -march=native -falign-loops=32  -DPSIQS -pthread  -o msiqs  msiqs.c siqs.c lanczos.c pr32_iter.c tinyecm64.c  -lgmp -lm
 
   Remove '-march=native' if building a portable binary.
   Remove '-DPSIQS -pthread' for a serial build.

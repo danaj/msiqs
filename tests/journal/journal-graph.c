@@ -29,9 +29,11 @@ int main(int argc, char **argv) {
     for (k=0;k<r->nfactors;k++)
       hash=siqs_mix64(hash ^ ((uint64_t)r->factors[k].row<<32) ^ r->factors[k].exponent);
   }
-  printf("{\"raw\":%u,\"full\":%u,\"smooth\":%llu,\"one_lp\":%llu,\"two_lp\":%llu,\"digest\":\"%016llx\"}\n",
+  printf("{\"raw\":%u,\"full\":%u,\"smooth\":%llu,\"one_lp\":%llu,\"two_lp\":%llu,"
+      "\"split_squfof\":%llu,\"split_ecm\":%llu,\"digest\":\"%016llx\"}\n",
       ctx.raw_count,ctx.full_count,(unsigned long long)ctx.accepted_smooth,
       (unsigned long long)ctx.accepted_one_lp,(unsigned long long)ctx.accepted_two_lp,
+      (unsigned long long)ctx.split_squfof,(unsigned long long)ctx.split_ecm,
       (unsigned long long)hash);
   sj_finish_call(journal,n,result.values,result.count);
   siqs_ctx_clear(&ctx);gmp_siqs_journal_close(journal);

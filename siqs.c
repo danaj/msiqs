@@ -53,7 +53,7 @@
 #include "siqs.h"
 #include "lanczos.h"
 #include "pr32_iter.h"
-#include "squfof126.h"
+#include "tinyecm64.h"
 
 static int siqs_is_prob_prime(const mpz_t n) {
   /* BPSW on GMP >= 6.2.  15 Miller-Rabin rounds on older versions. */
@@ -963,8 +963,8 @@ typedef struct {
   uint64_t split_attempts;
   uint64_t split_square;
   uint64_t split_siqs;
-  uint64_t split_squfof;
-  uint64_t split_rho;
+  uint64_t split_squfof; /* Historical journal count; no new SQUFOF calls. */
+  uint64_t split_ecm;    /* Uses the formerly unused rho journal slot. */
   uint64_t split_fail;
   uint64_t split_rejected;
   int factor_found;
@@ -4337,7 +4337,7 @@ static int siqs_resolve_cofactor(siqs_ctx_t *ctx, const mpz_t rest,
                                  uint64_t *lp1, uint64_t *lp2) {
   uint64_t n, pmax2, a = 0, b = 0;
   uint32_t nbits;
-  int prime, valid, can_siqs, success = 0;
+  int prime, valid, success = 0;
   uint64_t *method_counter = NULL;
 #ifdef SIQS_TIMING
   uint64_t timing_start;
@@ -4400,29 +4400,22 @@ static int siqs_resolve_cofactor(siqs_ctx_t *ctx, const mpz_t rest,
       mpz_clear(factor);
     }
   }
-  /* Only a larger outer input may enter SIQS: each residual fits uint64_t,
-   * so the inner call cannot invoke this stage again even if its 1LP policy
-   * changes.  Inputs of 64 bits or less keep SQUFOF at every residual size. */
-  can_siqs = ctx->params.bits > 64U;
-  /* SQUFOF wins below 56 bits; otherwise go directly to SIQS. */
-  if (!success && (!can_siqs || nbits < 56U)) {
-    mpz_t factor;
-    uint64_t rounds = nbits <= 40 ? 20000
-              : nbits <= 44 ? 50000
-              : nbits <= 48 ? 100000
-              : nbits <= 52 ? 200000 : 500000;
-    mpz_init(factor);
-    success = squfof126(rest, factor, rounds) &&
-              siqs_u64_split_pair(factor, n, &a, &b);
-    if (success)
-      method_counter = &ctx->split_squfof;
-    mpz_clear(factor);
+
+  if (!success) {
+    uint64_t rng = n;  /* seed derived from input n */
+    uint64_t f = tinyecm64(n, 0, &rng);
+    if (f != 0) {
+      success = 1;
+      method_counter = &ctx->split_ecm;
+      a = f;
+      b = n / f;
+    }
   }
-  /* Scratch/RNGs are private, the initialized prime cache is read-only, and
-   * verbosity zero is per-call rather than host-global. A low-bit SQUFOF
-   * miss reaches SIQS too. A terminal miss drops only this candidate,
-   * not the outer factorization. */
-  if (!success && can_siqs) {
+  /* While tinyecm64 has a very good success rate, it can fail to split.
+   * Call SIQS recursively as long as it's safe (more than 64 bits).
+   * Scratch/RNGs are private, the initialized prime cache is read-only, and
+   * verbosity zero is per-call rather than host-global. */
+  if (!success && ctx->params.bits > 64U) {
     success = siqs_split_to_u64(rest, ctx->largest_fb_prime, &a, &b);
     if (success)
       method_counter = &ctx->split_siqs;
@@ -6053,8 +6046,8 @@ static int siqs_run(siqs_ctx_t *ctx) {
       printf(" %llu SIQS,", (unsigned long long)ctx->split_siqs);
     if (ctx->split_squfof != 0)
       printf(" %llu SQUFOF,", (unsigned long long)ctx->split_squfof);
-    if (ctx->split_rho != 0)
-      printf(" %llu rho,", (unsigned long long)ctx->split_rho);
+    if (ctx->split_ecm != 0)
+      printf(" %llu ECM,", (unsigned long long)ctx->split_ecm);
     if (ctx->split_fail != 0)
       printf(" %llu failed,", (unsigned long long)ctx->split_fail);
     printf(" %llu rejected\n", (unsigned long long)ctx->split_rejected);

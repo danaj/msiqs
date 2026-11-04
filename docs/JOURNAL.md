@@ -242,11 +242,15 @@ this order:
 ```
 selected_family_count, completed_polynomial_count,
 total_candidates, split_attempts, split_square, split_siqs,
-split_squfof, split_rho, split_fail, split_rejected,
+split_squfof, split_ecm, split_fail, split_rejected,
 la_rng_state, cofactor_rng_state, polynomial_rng_state,
 completed_full_relations, retained_partials, current_collection_target,
 length_1, length_2, length_3, length_4, length_5, length_6, length_7, length_8plus
 ```
+
+The SQUFOF counter is retained for historical journals; new splits increment
+`split_ecm` instead. ECM uses the former `split_rho` slot, which was always
+zero before ECM was introduced. The version-1 layout remains unchanged.
 
 The snapshot describes graph state after every relation in this batch has
 been processed.  Size/event-triggered flushes therefore occur after processing

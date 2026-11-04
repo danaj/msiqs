@@ -90,8 +90,9 @@ sieve_score_bound large_prime_bound smooth_bound'''.split()
 DOUBLES = '''lp_multiplier residual_multiplier sieve_start_index_exponent
 fb_coefficient interval_scale sieve_hit_exponent sieve_hit_bound_nominal
 sieve_hit_residual_multiplier sieve_hit_bound log_scale'''.split()
+# Version 1 keeps the historical SQUFOF slot; ECM uses the former rho slot.
 PROGRESS = '''families polynomials candidates split_attempts split_square split_siqs
-split_squfof split_rho split_fail split_rejected la_rng cofactor_rng poly_rng
+split_squfof split_ecm split_fail split_rejected la_rng cofactor_rng poly_rng
 full_relations retained_partials collection_target'''.split()
 PROGRESS += ['length_'+str(i) for i in range(1,8)]+['length_8plus']
 

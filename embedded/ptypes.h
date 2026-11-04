@@ -5,7 +5,6 @@
 #ifndef MSIQS_PTYPES_H
 #define MSIQS_PTYPES_H
 #include <stdint.h>
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>

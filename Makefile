@@ -12,10 +12,10 @@ EXTRA_FLAGS ?=
 CHECK_ARGS ?=
 TUNE_ARGS ?=
 
-SOURCES = msiqs.c siqs.c lanczos.c pr32_iter.c squfof126.c
+SOURCES = msiqs.c siqs.c lanczos.c pr32_iter.c tinyecm64.c
 HEADERS = siqs.h lanczos.h siqs_choose_inc.c siqs_sieve_kernel_inc.c siqs_journal_inc.c \
 	psiqs_inc.c planczos_inc.c ptypes.h mont64.h pr32_iter.h \
-	squfof126.h
+	tinyecm64.h
 BUILD = $(PERL) tools/build-siqs.pl --cc "$(CC)" \
 	--cppflags "$(CPPFLAGS)" --cflags "$(CFLAGS) $(EXTRA_FLAGS)" \
 	--ldflags "$(LDFLAGS)" --ldlibs "$(LDLIBS)"
@@ -47,10 +47,10 @@ bench-lanczos: tools/lanczos-bench.c lanczos.c lanczos.h planczos_inc.c ptypes.h
 	@$(BUILD) --ldlibs "-lm" --output $@ tools/lanczos-bench.c
 
 bench-solvers: tools/siqs-la-bench.c $(BENCH_DEPS) $(BUILD_DEPS) Makefile
-	@$(BUILD) --serial --output $@ tools/siqs-la-bench.c siqs.c pr32_iter.c squfof126.c
+	@$(BUILD) --serial --output $@ tools/siqs-la-bench.c siqs.c pr32_iter.c tinyecm64.c
 
 bench-sieve: tools/siqs-sieve-bench.c tools/siqs-autotune.inc.c $(BENCH_DEPS) $(BUILD_DEPS) Makefile
-	@$(BUILD) --output $@ tools/siqs-sieve-bench.c lanczos.c pr32_iter.c squfof126.c
+	@$(BUILD) --output $@ tools/siqs-sieve-bench.c lanczos.c pr32_iter.c tinyecm64.c
 
 # The main and embedded runners manage their temporary-directory cleanup.
 # To force serial checks: make check CHECK_ARGS=--serial
@@ -75,7 +75,7 @@ check-journal:
 
 check-autotune: tests/siqs-autotune-check.c tools/siqs-sieve-bench.c tools/siqs-autotune.inc.c $(BENCH_DEPS) $(BUILD_DEPS) Makefile
 	@trap 'rm -f check-autotune' 0; \
-	$(BUILD) --output check-autotune tests/siqs-autotune-check.c lanczos.c pr32_iter.c squfof126.c && \
+	$(BUILD) --output check-autotune tests/siqs-autotune-check.c lanczos.c pr32_iter.c tinyecm64.c && \
 	./check-autotune && \
 	$(PERL) tests/siqs-autotune.t
 

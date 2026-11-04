@@ -102,8 +102,9 @@ testing.  The design expectation of msiqs is to factor all composite
 inputs within its size range.  Composites with multiple factors are
 usually fully factored, but this is not guaranteed.
 
-msiqs implements the Self-Initializing Quadratic Sieve.  It does not
-implement ECM or NFS, which can be more practical choices for some inputs.
+msiqs implements the Self-Initializing Quadratic Sieve, using small ECM
+internally to split relation cofactors.  It does not offer general-purpose
+ECM or NFS factoring, which can be more practical choices for some inputs.
 While it works well from 1 to at least 430 bits, typically SIQS is one part
 of a generic factoring package, as in a general-purpose factoring routine, or in
 [YAFU](http://sourceforge.net/projects/yafu/).
