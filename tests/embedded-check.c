@@ -2,10 +2,10 @@
 #include <stdlib.h>
 static int cofactor_miss_ecm;
 static unsigned int cofactor_ecm_calls;
-static uint64_t embedded_check_ecm(uint64_t n, int try_small, uint64_t *state) {
+static uint64_t embedded_check_ecm(uint64_t n, int try_small) {
   cofactor_ecm_calls++;
-  if (try_small != 0 || *state != n) exit(24);
-  return cofactor_miss_ecm ? 0 : tinyecm64(n, try_small, state);
+  if (try_small != 0) exit(24);
+  return cofactor_miss_ecm ? 0 : tinyecm64(n, try_small);
 }
 #define tinyecm64 embedded_check_ecm
 #include "../embedded/siqs.c"

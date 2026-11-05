@@ -6,7 +6,7 @@ Build and run commands below assume the repository root.
 Build from the repository root:
   make bench-solvers
 or compile directly:
-  cc -std=c99 -O3 -march=native -falign-loops=32 -UPSIQS -o bench-solvers \
+  cc -O3 -march=native -falign-loops=32 -UPSIQS -o bench-solvers \
     tools/siqs-la-bench.c siqs.c pr32_iter.c tinyecm64.c -lgmp -lm
 
 Run on a QUIET machine, with unrelated factoring/benchmark queues paused:

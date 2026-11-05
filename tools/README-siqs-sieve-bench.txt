@@ -8,7 +8,7 @@ this is an optional developer tool):
   make bench-sieve
 
 Or compile directly with a C compiler:
-  cc -std=c99 -O3 -march=native -falign-loops=32 -DPSIQS -pthread \
+  cc -O3 -march=native -falign-loops=32 -DPSIQS -pthread \
     -o bench-sieve tools/siqs-sieve-bench.c lanczos.c \
     pr32_iter.c tinyecm64.c -lgmp -lm
 

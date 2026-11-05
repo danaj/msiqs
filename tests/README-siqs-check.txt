@@ -30,7 +30,7 @@ be installed or built. Use --keep to retain the binary.
 
 Direct build without Perl or a generated Makefile, from the repository root:
 
-  cc -std=c99 -O3 -o /tmp/siqs-check tests/siqs-check.c \
+  cc -O3 -o /tmp/siqs-check tests/siqs-check.c \
     pr32_iter.c tinyecm64.c -lgmp -lm
   /tmp/siqs-check --suite sieve
   /tmp/siqs-check --extended --verbose

@@ -4,7 +4,7 @@ from pathlib import Path
 import os,shlex,subprocess,tempfile
 ROOT=Path(__file__).resolve().parents[1]
 cc=shlex.split(os.environ.get('CC','cc'))
-flags=shlex.split(os.environ.get('CPPFLAGS',''))+shlex.split(os.environ.get('CFLAGS','-O2 -std=c99 -Wall -Wextra'))
+flags=shlex.split(os.environ.get('CPPFLAGS',''))+shlex.split(os.environ.get('CFLAGS','-O2 -Wall -Wextra'))
 ldflags=shlex.split(os.environ.get('LDFLAGS',''))
 with tempfile.TemporaryDirectory(prefix='msiqs-embedded-') as tmp:
     def test(name,sources,libs=(),extra=()):

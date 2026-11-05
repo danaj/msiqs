@@ -1,6 +1,6 @@
 /* Fixed-width types and small portability helpers for msiqs.
  * Copyright (c) 2026 Dana Jacobsen. MIT license; see LICENSE.
- * C99 and a uint64_t type are required. Native 128-bit support is optional.
+ * A uint64_t type is required. Native 128-bit support is optional.
  */
 #ifndef MSIQS_PTYPES_H
 #define MSIQS_PTYPES_H
@@ -35,12 +35,19 @@
 # define MAYBE_UNUSED
 # define NOINLINE
 #endif
-#ifdef _MSC_VER
-# define INLINE __inline
+
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
+# define INLINE   inline
+# define RESTRICT restrict
+#elif defined(__GNUC__) || defined(__clang__)
+# define INLINE   __inline__
+# define RESTRICT __restrict__
+#elif defined(_MSC_VER)
+# define INLINE   __inline
 # define RESTRICT __restrict
 #else
-# define INLINE inline
-# define RESTRICT restrict
+# define INLINE
+# define RESTRICT
 #endif
 
 /* Fatal allocation and invariant errors terminate the standalone caller. */

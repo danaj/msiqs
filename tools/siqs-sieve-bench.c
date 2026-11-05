@@ -3,7 +3,7 @@
  * See README-siqs-sieve-bench.txt. Includes the production private interfaces,
  * as siqs-check does; no production hooks, policies or binaries are changed.
  *
- * cc -std=c99 -O3 -march=native -falign-loops=32 -DPSIQS -pthread \
+ * cc -O3 -march=native -falign-loops=32 -DPSIQS -pthread \
  *   -o bench-sieve tools/siqs-sieve-bench.c lanczos.c \
  *   pr32_iter.c tinyecm64.c -lgmp -lm
  * Copyright (c) 2026 Dana Jacobsen. See LICENSE for redistribution terms.

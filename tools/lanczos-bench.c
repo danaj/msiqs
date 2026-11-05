@@ -4,7 +4,7 @@
  * Including the solver exposes its actual pool size and unchanged recurrence;
  * no instrumentation or benchmark hooks are needed in production sources.
  *
- * cc -std=c99 -O3 -march=native -falign-loops=32 -DPSIQS -pthread \
+ * cc -O3 -march=native -falign-loops=32 -DPSIQS -pthread \
  *    -o bench-lanczos tools/lanczos-bench.c -lm
  * Copyright (c) 2026 Dana Jacobsen. See LICENSE for redistribution terms.
  */

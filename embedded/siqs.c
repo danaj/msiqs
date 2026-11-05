@@ -4313,8 +4313,7 @@ static int siqs_resolve_cofactor(siqs_ctx_t *ctx, const mpz_t rest,
     }
   }
   if (!success) {
-    uint64_t rng = n;  /* seed derived from input n */
-    uint64_t f = tinyecm64(n, 0, &rng);
+    uint64_t f = tinyecm64(n, 0);
     if (f != 0) {
       success = 1;
       method_counter = &ctx->split_ecm;

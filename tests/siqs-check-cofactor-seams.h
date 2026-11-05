@@ -7,14 +7,14 @@ static int cofactor_miss_siqs, cofactor_trace;
 static unsigned int cofactor_ecm_calls, cofactor_prime_calls;
 static uint64_t cofactor_ecm_input, cofactor_ecm_seed;
 static int cofactor_ecm_try_small;
-static uint64_t check_cofactor_ecm(uint64_t n, int try_small, uint64_t *state) {
+static uint64_t check_cofactor_ecm(uint64_t n, int try_small) {
   if (cofactor_trace) {
     cofactor_ecm_calls++;
     cofactor_ecm_input = n;
-    cofactor_ecm_seed = *state;
+    cofactor_ecm_seed = n;
     cofactor_ecm_try_small = try_small;
   }
-  return cofactor_miss_ecm ? 0 : tinyecm64(n, try_small, state);
+  return cofactor_miss_ecm ? 0 : tinyecm64(n, try_small);
 }
 /* Capture the real GMP call before interposing the private SIQS helper.
  * Explicit reference checks after siqs.c also use this real entry point. */

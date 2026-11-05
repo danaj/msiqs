@@ -7,7 +7,7 @@ Build only (does not run a large benchmark):
   make bench-lanczos
 
 Or compile directly with a C compiler:
-  cc -std=c99 -O3 -march=native -falign-loops=32 -DPSIQS -pthread \
+  cc -O3 -march=native -falign-loops=32 -DPSIQS -pthread \
     -o bench-lanczos tools/lanczos-bench.c -lm
 
 The benchmark and solver have no GMP or SIQS host-adapter dependency.

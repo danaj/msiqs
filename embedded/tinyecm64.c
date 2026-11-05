@@ -1,4 +1,4 @@
-/* tinyecm64 1.0.0
+/* tinyecm64 1.0.1
  *
  * ECM for uint64_t inputs.  Portable C, no GMP, no heap allocation.
  *
@@ -21,7 +21,7 @@
  * Montgomery's PRAC chains are generated offline and packed into 32-bit words.
  * No assembly, explicit SIMD intrinsics, GMP, or heap allocation.
  *
- * Copyright (c) 2026 Dana Jacobsen. See LICENSE for redistribution terms.
+ * Copyright (c) 2026 Dana Jacobsen.  See LICENSE for redistribution terms.
  */
 
 #include "tinyecm64.h"
@@ -31,8 +31,9 @@
 /* Stage-2 products share a GCD across eight windows. Failed products are
  * recovered using every unchecked window's own giant point. */
 enum { ECM64_GCD_WINDOWS = 8, ECM64_LANES = 4 };
+
 #if defined(__GNUC__) || defined(__clang__)
-#define ECM64_INLINE static inline __attribute__((always_inline))
+#define ECM64_INLINE static __inline__ __attribute__((always_inline))
 #else
 #define ECM64_INLINE static INLINE
 #endif
@@ -537,13 +538,14 @@ typedef struct {
  * hide different factors, scan individual Z values before abandoning a curve. */
 static int check_point_denominators(uint64_t *factor, const ecm_point *points,
                                      unsigned count, const mont64_t *ctx) {
+  unsigned i;
   uint64_t product = ctx->one, g;
   *factor = 0;
-  for (unsigned i = 0; i < count; i++) product = multiply(product, points[i].Z, ctx);
+  for (i = 0; i < count; i++) product = multiply(product, points[i].Z, ctx);
   g = gcd64(product, ctx->n);
   if (g == 1) return 1;
   if (g < ctx->n) *factor = g;
-  else for (unsigned i = 0; i < count; i++) {
+  else for (i = 0; i < count; i++) {
     g = gcd64(points[i].Z, ctx->n);
     if (g > 1 && g < ctx->n) { *factor = g; break; }
   }
@@ -551,13 +553,15 @@ static int check_point_denominators(uint64_t *factor, const ecm_point *points,
 }
 
 static const ecm64_plan *find_plan(uint32_t b1, uint32_t b2) {
-  for (size_t i = 0; i < sizeof(plans) / sizeof(plans[0]); i++)
+  size_t i;
+  for (i = 0; i < sizeof(plans) / sizeof(plans[0]); i++)
     if (plans[i].b1 == b1 && plans[i].b2 == b2) return &plans[i];
   return NULL;
 }
 
 static void scalar_geometry(const ecm_point *q, uint64_t a24, const mont64_t *ctx,
                             const ecm64_plan *p, scalar_workspace *ws) {
+  unsigned i, w;
   ecm_point q2, q3, q5, q6, q7, step, current, previous, next;
   ecm_point *babies = ws->nq, *giants = babies + p->babies;
   point_double(&q2, q, a24, ctx);
@@ -568,7 +572,7 @@ static void scalar_geometry(const ecm_point *q, uint64_t a24, const mont64_t *ct
   babies[p->slots[1]] = *q;
   previous = *q;
   current = q7;
-  for (unsigned i = 7; i <= p->d; i += 6) {
+  for (i = 7; i <= p->d; i += 6) {
     if (i % 5) babies[p->slots[i]] = current;
     if (i + 6 <= p->d) {
       point_add(&next, &current, &q6, &previous, ctx);
@@ -578,7 +582,7 @@ static void scalar_geometry(const ecm_point *q, uint64_t a24, const mont64_t *ct
   }
   previous = *q;
   current = q5;
-  for (unsigned i = 5; i <= p->d; i += 6) {
+  for (i = 5; i <= p->d; i += 6) {
     if (i % 5) babies[p->slots[i]] = current;
     if (i + 6 <= p->d) {
       point_add(&next, &current, &q6, &previous, ctx);
@@ -589,7 +593,7 @@ static void scalar_geometry(const ecm_point *q, uint64_t a24, const mont64_t *ct
   point_multiply(&step, &q6, 2 * p->d / 6, a24, ctx);
   giants[0] = step;
   if (p->windows > 1) point_double(&giants[1], &step, a24, ctx);
-  for (unsigned w = 2; w < p->windows; w++)
+  for (w = 2; w < p->windows; w++)
     point_add(&giants[w], &step, &giants[w - 1], &giants[w - 2], ctx);
 }
 
@@ -603,8 +607,9 @@ static INLINE uint64_t stage2_diff(const ecm_point *giant, const ecm_point *baby
 
 static uint64_t scalar_recover(const ecm64_plan *p, const ecm_point *points,
                                unsigned first, unsigned last, const mont64_t *ctx) {
-  for (unsigned w = first; w <= last; w++)
-    for (unsigned i = p->offsets[w]; i < p->offsets[w + 1]; i++) {
+  unsigned w, i;
+  for (w = first; w <= last; w++)
+    for (i = p->offsets[w]; i < p->offsets[w + 1]; i++) {
       uint64_t f = gcd64(stage2_diff(points + p->babies + w, points + p->indices[i], ctx), ctx->n);
       if (f > 1 && f < ctx->n) return f;
     }
@@ -613,6 +618,7 @@ static uint64_t scalar_recover(const ecm64_plan *p, const ecm_point *points,
 
 static uint64_t scalar_stage2(const ecm_point *q, uint64_t a24, const mont64_t *ctx,
                               const ecm64_plan *p, scalar_workspace *ws) {
+  unsigned w, i;
   const uint64_t n = ctx->n;
   ecm_point *babies = ws->nq;
   uint64_t f;
@@ -623,8 +629,8 @@ static uint64_t scalar_stage2(const ecm_point *q, uint64_t a24, const mont64_t *
 
   uint64_t product = ctx->one;
   unsigned checked_window = 0;
-  for (unsigned w = 0; w < p->windows; w++) {
-    for (unsigned i = p->offsets[w]; i < p->offsets[w + 1]; i++) {
+  for (w = 0; w < p->windows; w++) {
+    for (i = p->offsets[w]; i < p->offsets[w + 1]; i++) {
       uint64_t diff = stage2_diff(babies + p->babies + w, babies + p->indices[i], ctx);
       product = multiply(product, diff, ctx);
     }
@@ -644,6 +650,7 @@ static uint64_t scalar_stage2(const ecm_point *q, uint64_t a24, const mont64_t *
 
 static void setup_terms(const mont64_t *ctx, uint16_t sigma, ecm_point *point, uint64_t *num,
                         uint64_t *den) {
+  unsigned i;
   uint64_t n = ctx->n, ui = (uint64_t)sigma * sigma - 5, vi = 4 * (uint64_t)sigma;
   uint64_t u = mont64_enter(((ui) % (n)), ctx), v = mont64_enter(((vi) % (n)), ctx);
   uint64_t delta = mont64_enter(((ui - vi) % (n)), ctx);
@@ -654,7 +661,7 @@ static void setup_terms(const mont64_t *ctx, uint16_t sigma, ecm_point *point, u
   *num = multiply(d3, mont64_enter(((3 * ui + vi) % (n)), ctx), ctx);
   *num = *num ? n - *num : 0;
   *den = multiply(point->X, v, ctx);
-  for (unsigned i = 0; i < 4; i++)
+  for (i = 0; i < 4; i++)
     *den = mont64_add(*den, *den, n);
 }
 
@@ -676,6 +683,7 @@ static uint64_t setup_curve(const mont64_t *ctx, uint16_t sigma, ecm_point *poin
 
 static uint64_t scalar_curve(const mont64_t *ctx, const ecm64_plan *p, uint16_t sigma,
                              scalar_workspace *ws, int use_prac) {
+  uint32_t j;
 
   const uint64_t n = ctx->n;
   uint64_t a24;
@@ -684,7 +692,7 @@ static uint64_t scalar_curve(const mont64_t *ctx, const ecm64_plan *p, uint16_t 
   uint64_t initial = setup_curve(ctx, sigma, &point, &a24, &ready);
   if (initial || !ready) return initial;
 
-  for (uint32_t j = 0; j < p->npowers; j++) {
+  for (j = 0; j < p->npowers; j++) {
     if (use_prac)
       scalar_stage1_prac(&point, &point, p->powers[j], a24, ctx);
     else
@@ -707,12 +715,13 @@ static uint64_t splitmix(uint64_t *state) {
 }
 
 static uint16_t next_sigma(uint16_t *sigmas, unsigned i, uint64_t *state) {
+  unsigned j;
   uint16_t s;
   int duplicate;
   do {
     s = (uint16_t)(6 + splitmix(state) % 65530);
     duplicate = 0;
-    for (unsigned j = 0; j < i; j++)
+    for (j = 0; j < i; j++)
       if (sigmas[j] == s) {
         duplicate = 1;
         break;
@@ -757,9 +766,10 @@ ECM64_INLINE uint64_t four_submod(uint64_t a, uint64_t b, uint64_t n) {
 }
 ECM64_INLINE void four_double(four_point *R, const four_point *P, const uint64_t *a24,
                               const four_modulus *ctx) {
+  unsigned i;
 
   four_point result;
-  for (unsigned i = 0; i < ECM64_LANES; i++) {
+  for (i = 0; i < ECM64_LANES; i++) {
     uint64_t x = P->X[i], z = P->Z[i], a = four_submod(x, z, ctx->n), b = four_addmod(x, z, ctx->n);
     uint64_t u = four_multiply(a, a, ctx), v = four_multiply(b, b, ctx),
              w = four_submod(v, u, ctx->n);
@@ -770,9 +780,10 @@ ECM64_INLINE void four_double(four_point *R, const four_point *P, const uint64_t
 }
 ECM64_INLINE void four_add(four_point *R, const four_point *P, const four_point *Q,
                            const four_point *D, const four_modulus *ctx) {
+  unsigned i;
 
   four_point result;
-  for (unsigned i = 0; i < ECM64_LANES; i++) {
+  for (i = 0; i < ECM64_LANES; i++) {
     uint64_t u = four_multiply(four_submod(P->X[i], P->Z[i], ctx->n),
                                four_addmod(Q->X[i], Q->Z[i], ctx->n), ctx);
     uint64_t v = four_multiply(four_addmod(P->X[i], P->Z[i], ctx->n),
@@ -908,6 +919,7 @@ typedef struct {
 
 static void four_geometry(const four_point *q, const uint64_t *a24, const four_modulus *ctx,
                           const ecm64_plan *p, four_workspace *ws) {
+  unsigned i, w;
   four_point q2, q3, q5, q6, q7, step, current, previous, next;
   four_point *babies = ws->points, *giants = babies + p->babies;
   four_double(&q2, q, a24, ctx);
@@ -918,7 +930,7 @@ static void four_geometry(const four_point *q, const uint64_t *a24, const four_m
   babies[p->slots[1]] = *q;
   previous = *q;
   current = q7;
-  for (unsigned i = 7; i <= p->d; i += 6) {
+  for (i = 7; i <= p->d; i += 6) {
     if (i % 5) babies[p->slots[i]] = current;
     if (i + 6 <= p->d) {
       four_add(&next, &current, &q6, &previous, ctx);
@@ -928,7 +940,7 @@ static void four_geometry(const four_point *q, const uint64_t *a24, const four_m
   }
   previous = *q;
   current = q5;
-  for (unsigned i = 5; i <= p->d; i += 6) {
+  for (i = 5; i <= p->d; i += 6) {
     if (i % 5) babies[p->slots[i]] = current;
     if (i + 6 <= p->d) {
       four_add(&next, &current, &q6, &previous, ctx);
@@ -939,20 +951,21 @@ static void four_geometry(const four_point *q, const uint64_t *a24, const four_m
   four_ladder(&step, &q6, 2 * p->d / 6, a24, ctx);
   giants[0] = step;
   if (p->windows > 1) four_double(&giants[1], &step, a24, ctx);
-  for (unsigned w = 2; w < p->windows; w++)
+  for (w = 2; w < p->windows; w++)
     four_add(&giants[w], &step, &giants[w - 1], &giants[w - 2], ctx);
 }
 
 /* Input and output arrays are distinct; all four values share one modulus. */
 static int invert_four(uint64_t out[4], const uint64_t in[4], const mont64_t *ctx) {
+  unsigned i;
   uint64_t prefix[4], inv;
   prefix[0] = in[0];
-  for (unsigned i = 1; i < 4; i++)
+  for (i = 1; i < 4; i++)
     prefix[i] = multiply(prefix[i - 1], in[i], ctx);
   inv = inverse64(mont64_exit(prefix[3], ctx), ctx->n);
   if (!inv) return 0;
   inv = mont64_enter(inv, ctx);
-  for (unsigned i = 3; i > 0; i--) {
+  for (i = 3; i > 0; i--) {
     out[i] = multiply(inv, prefix[i - 1], ctx);
     inv = multiply(inv, in[i], ctx);
   }
@@ -962,16 +975,17 @@ static int invert_four(uint64_t out[4], const uint64_t in[4], const mont64_t *ct
 
 static uint64_t setup_four(const mont64_t *ctx, const uint16_t *sigmas, four_point *point,
                            uint64_t a24[4], unsigned *active) {
+  unsigned lane;
   uint64_t num[4], den[4], inv[4];
 
-  for (unsigned lane = 0; lane < 4; lane++) {
+  for (lane = 0; lane < 4; lane++) {
     ecm_point p;
     setup_terms(ctx, sigmas[lane], &p, &num[lane], &den[lane]);
     point->X[lane] = p.X;
     point->Z[lane] = p.Z;
   }
   if (invert_four(inv, den, ctx)) {
-    for (unsigned lane = 0; lane < 4; lane++)
+    for (lane = 0; lane < 4; lane++)
       a24[lane] = multiply(num[lane], inv[lane], ctx);
     *active = 15;
     return 0;
@@ -979,7 +993,7 @@ static uint64_t setup_four(const mont64_t *ctx, const uint16_t *sigmas, four_poi
   /* A product can hide factors from different lanes, or one denominator
    * can be zero. Reuse the original setup/factor/rejected-curve handling. */
   *active = 0;
-  for (unsigned lane = 0; lane < 4; lane++) {
+  for (lane = 0; lane < 4; lane++) {
     ecm_point p;
     int ready;
     uint64_t f = setup_curve(ctx, sigmas[lane], &p, &a24[lane], &ready);
@@ -996,24 +1010,25 @@ static uint64_t setup_four(const mont64_t *ctx, const uint16_t *sigmas, four_poi
 
 static uint64_t check_four_denominators(four_workspace *ws, unsigned count,
                                         const mont64_t *ctx, unsigned *active) {
+  unsigned lane, i;
   four_modulus mod = {ctx->n, (uint64_t)0 - ctx->ninv};
   uint64_t acc[4] = {ctx->one, ctx->one, ctx->one, ctx->one};
   uint64_t product = ctx->one;
-  for (unsigned lane = 0; lane < 4; lane++)
+  for (lane = 0; lane < 4; lane++)
     if (!(*active & (1U << lane)))
-      for (unsigned i = 0; i < count; i++)
+      for (i = 0; i < count; i++)
         ws->points[i].X[lane] = ws->points[i].Z[lane] = ctx->one;
-  for (unsigned i = 0; i < count; i++)
-    for (unsigned lane = 0; lane < 4; lane++)
+  for (i = 0; i < count; i++)
+    for (lane = 0; lane < 4; lane++)
       acc[lane] = four_multiply(acc[lane], ws->points[i].Z[lane], &mod);
-  for (unsigned lane = 0; lane < 4; lane++) product = multiply(product, acc[lane], ctx);
+  for (lane = 0; lane < 4; lane++) product = multiply(product, acc[lane], ctx);
   if (gcd64(product, ctx->n) == 1) return 0;
   /* Match scalar recovery order when different lanes hide each other's factors. */
-  for (unsigned lane = 0; lane < 4; lane++) if (*active & (1U << lane)) {
+  for (lane = 0; lane < 4; lane++) if (*active & (1U << lane)) {
     uint64_t g = gcd64(acc[lane], ctx->n);
     if (g > 1 && g < ctx->n) return g;
     if (g == ctx->n) {
-      for (unsigned i = 0; i < count; i++) {
+      for (i = 0; i < count; i++) {
         g = gcd64(ws->points[i].Z[lane], ctx->n);
         if (g > 1 && g < ctx->n) return g;
       }
@@ -1026,14 +1041,15 @@ static uint64_t check_four_denominators(four_workspace *ws, unsigned count,
 /* Combine active lanes; scan them separately if their factors hide each other. */
 static uint64_t gcd_four(const uint64_t values[4], unsigned active, const mont64_t *ctx,
                          unsigned *lost) {
+  unsigned lane;
   uint64_t prod = ctx->one, g;
   *lost = 0;
-  for (unsigned lane = 0; lane < 4; lane++)
+  for (lane = 0; lane < 4; lane++)
     if (active & (1U << lane)) prod = multiply(prod, values[lane], ctx);
   g = gcd_residue(prod, ctx);
   if (g > 1 && g < ctx->n) return g;
   if (g == ctx->n)
-    for (unsigned lane = 0; lane < 4; lane++)
+    for (lane = 0; lane < 4; lane++)
       if (active & (1U << lane)) {
         g = gcd_residue(values[lane], ctx);
         if (g > 1 && g < ctx->n) return g;
@@ -1049,9 +1065,10 @@ static INLINE uint64_t stage2_diff_four(const four_workspace *ws, unsigned g, un
 
 static uint64_t recover_lane(const ecm64_plan *p, unsigned first, unsigned last,
                              const four_workspace *ws, unsigned lane, const mont64_t *ctx) {
+  unsigned w, i;
   four_modulus mod = {ctx->n, (uint64_t)0 - ctx->ninv};
-  for (unsigned w = first; w <= last; w++)
-    for (unsigned i = p->offsets[w]; i < p->offsets[w + 1]; i++) {
+  for (w = first; w <= last; w++)
+    for (i = p->offsets[w]; i < p->offsets[w + 1]; i++) {
       uint64_t diff = stage2_diff_four(ws, p->babies + w, p->indices[i], lane, &mod);
       uint64_t f = gcd64(diff, ctx->n);
       if (f > 1 && f < ctx->n) return f;
@@ -1060,6 +1077,8 @@ static uint64_t recover_lane(const ecm64_plan *p, unsigned first, unsigned last,
 }
 
 static uint64_t four_curve(const mont64_t *ctx, const ecm64_plan *p, const uint16_t *sigmas) {
+  uint32_t j;
+  unsigned w, i, lane;
   four_point point;
   uint64_t a24[4], f, n = ctx->n;
   unsigned active = 0;
@@ -1072,7 +1091,7 @@ static uint64_t four_curve(const mont64_t *ctx, const ecm64_plan *p, const uint1
   if (f) return f;
   if (!active) return 0;
 
-  for (uint32_t j = 0; j < p->npowers; j++) {
+  for (j = 0; j < p->npowers; j++) {
     four_stage1(&point, &point, p->powers[j], a24, &mod);
     if (j == 0) memcpy(first_z, point.Z, sizeof(first_z));
     else if ((j % 64) == 0) {
@@ -1107,9 +1126,9 @@ static uint64_t four_curve(const mont64_t *ctx, const ecm64_plan *p, const uint1
 
   uint64_t product[4] = {ctx->one, ctx->one, ctx->one, ctx->one};
   unsigned checked_window = 0;
-  for (unsigned w = 0; w < p->windows; w++) {
-    for (unsigned i = p->offsets[w]; i < p->offsets[w + 1]; i++)
-      for (unsigned lane = 0; lane < 4; lane++) {
+  for (w = 0; w < p->windows; w++) {
+    for (i = p->offsets[w]; i < p->offsets[w + 1]; i++)
+      for (lane = 0; lane < 4; lane++) {
         uint64_t diff = stage2_diff_four(&ws, p->babies + w, p->indices[i], lane, &mod);
         product[lane] = four_multiply(product[lane], diff, &mod);
       }
@@ -1118,7 +1137,7 @@ static uint64_t four_curve(const mont64_t *ctx, const ecm64_plan *p, const uint1
       unsigned lost;
       f = gcd_four(product, active, ctx, &lost);
       if (f) return f;
-      for (unsigned lane = 0; lane < 4; lane++)
+      for (lane = 0; lane < 4; lane++)
         if (lost & (1U << lane)) {
           f = recover_lane(p, checked_window, w, &ws, lane, ctx);
           if (f) return f;
@@ -1158,8 +1177,9 @@ enum { MAX_MAIN_CURVES = 46, MAX_PREFIX_CURVES = 2, RESCUE_CURVES = 8 };
 static NOINLINE uint64_t rescue_curves(const mont64_t *ctx, unsigned b1,
                                       const uint16_t *seen, unsigned nseen,
                                       uint64_t *state, int four) {
+  unsigned j;
   unsigned next_b1 = b1;
-  for (unsigned j = 0; j < sizeof(policy) / sizeof(policy[0]); j++) {
+  for (j = 0; j < sizeof(policy) / sizeof(policy[0]); j++) {
     if (policy[j].b1 >= 70 && policy[j].b1 > b1) {
       next_b1 = policy[j].b1;
       break;
@@ -1170,8 +1190,9 @@ static NOINLINE uint64_t rescue_curves(const mont64_t *ctx, unsigned b1,
   memcpy(sigmas, seen, nseen * sizeof(*sigmas));
 #if MONT64_HAVE_UINT128
   if (four) {
-    for (unsigned i = 0; i < RESCUE_CURVES; i += ECM64_LANES) {
-      for (unsigned j = 0; j < ECM64_LANES; j++)
+    unsigned i;
+    for (i = 0; i < RESCUE_CURVES; i += ECM64_LANES) {
+      for (j = 0; j < ECM64_LANES; j++)
         next_sigma(sigmas, nseen + i + j, state);
       uint64_t f = four_curve(ctx, plan, sigmas + nseen + i);
       if (f) return f;
@@ -1180,7 +1201,7 @@ static NOINLINE uint64_t rescue_curves(const mont64_t *ctx, unsigned b1,
   }
 #endif
   scalar_workspace ws;
-  for (unsigned j = 0; j < RESCUE_CURVES; j++) {
+  for (j = 0; j < RESCUE_CURVES; j++) {
     uint16_t sigma = next_sigma(sigmas, nseen + j, state);
     uint64_t f = scalar_curve(ctx, plan, sigma, &ws, four);
     if (f) return f;
@@ -1190,6 +1211,7 @@ static NOINLINE uint64_t rescue_curves(const mont64_t *ctx, unsigned b1,
 
 static uint64_t factor_with_policy(uint64_t n, unsigned b1, unsigned count,
                                    int try_small, int four, uint64_t *rng_state) {
+  unsigned i;
   uint64_t state = splitmix(rng_state);
   uint16_t sigmas[MAX_MAIN_CURVES + MAX_PREFIX_CURVES];
   mont64_t ctx;
@@ -1199,18 +1221,19 @@ static uint64_t factor_with_policy(uint64_t n, unsigned b1, unsigned count,
    * B1=27, add one scalar B1=70 curve. Both are additional
    * to the main and rescue budgets; try_small=0 skips them entirely. */
   unsigned prefix = try_small ? 1 + (b1 > 27) : 0;
-  for (unsigned i = 0; i < prefix; i++) {
+  for (i = 0; i < prefix; i++) {
     next_sigma(sigmas, i, &state);
     const ecm64_plan *small_plan = i == 0 ? &prefix15 : find_plan(70, 1750);
     uint64_t f = scalar_curve(&ctx, small_plan, sigmas[i], &ws, 0);
     if (f) return f;
   }
   const ecm64_plan *plan = find_plan(b1, 25 * b1);
-  unsigned i = 0;
+  i = 0;
 #if MONT64_HAVE_UINT128
   if (four)
     for (; i + ECM64_LANES <= count; i += ECM64_LANES) {
-      for (unsigned lane = 0; lane < ECM64_LANES; lane++)
+      unsigned lane;
+      for (lane = 0; lane < ECM64_LANES; lane++)
         next_sigma(sigmas, prefix + i + lane, &state);
       uint64_t f = four_curve(&ctx, plan, sigmas + prefix + i);
       if (f) return f;
@@ -1226,11 +1249,12 @@ static uint64_t factor_with_policy(uint64_t n, unsigned b1, unsigned count,
   }
   return rescue_curves(&ctx, b1, sigmas, prefix + count, &state, four);
 }
-uint64_t tinyecm64(uint64_t n, int try_small, uint64_t *rng_state) {
+uint64_t tinyecm64_rng(uint64_t n, int try_small, uint64_t *rng_state) {
+  uint64_t v;
   if (n < 4) return 0;
   if (!(n & 1)) return 2;
   unsigned bits = 0;
-  for (uint64_t v = n; v; v >>= 1)
+  for (v = n; v; v >>= 1)
     bits++;
   unsigned rung = 0;
   while (bits > policy[rung].max_bits)
@@ -1246,4 +1270,9 @@ uint64_t tinyecm64(uint64_t n, int try_small, uint64_t *rng_state) {
   return factor_with_policy(n, policy[rung].b1, policy[rung].curves, try_small,
                             bits >= FOUR_CURVE_MIN_BITS, rng_state);
 #endif
+}
+
+uint64_t tinyecm64(uint64_t n, int try_small) {
+  uint64_t state = n;
+  return tinyecm64_rng(n, try_small, &state);
 }

@@ -273,8 +273,9 @@ are equivalent ways to request workers in a threaded build.
 threading.  Remove `msiqs` before rebuilding to return to
 autodetection or after changing compiler settings.
 
-The standalone build normally uses `-std=c99 -O3 -march=native -falign-loops=32`;
-compiler flags can be overridden with `CFLAGS`.  The 32-byte loop alignment
+The standalone build normally uses `-O3 -march=native -falign-loops=32` and
+leaves the language standard at the compiler's default. Compiler flags can
+be overridden with `CFLAGS`.  The 32-byte loop alignment
 avoids placement-sensitive sieve slowdowns seen on x86; retain it with custom
 flags when the compiler supports it.  The Makefile also accepts `CC`, `CPPFLAGS`,
 `LDFLAGS`, and `LDLIBS`.
@@ -282,7 +283,7 @@ There is a build helper using Perl, but the executable itself has nothing
 to do with Perl.
 
 ```sh
-cc -std=c99 -O3 -march=native -falign-loops=32 -DPSIQS -pthread -o msiqs msiqs.c siqs.c lanczos.c pr32_iter.c tinyecm64.c -lgmp -lm
+cc -O3 -march=native -falign-loops=32 -DPSIQS -pthread -o msiqs msiqs.c siqs.c lanczos.c pr32_iter.c tinyecm64.c -lgmp -lm
 ```
 
 Remove `-DPSIQS -pthread` to disable threading.

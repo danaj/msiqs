@@ -12,7 +12,7 @@ Compile lanczos.c with lanczos.h and ptypes.h alongside it. No GMP, libm,
 my-nullspace.c, build from the repository root with:
 
 ```sh
-cc -std=c99 -O3 -Iembedded -o my-nullspace my-nullspace.c embedded/lanczos.c
+cc -O3 -Iembedded -o my-nullspace my-nullspace.c embedded/lanczos.c
 ```
 
 ## Matrix representation

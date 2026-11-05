@@ -3,7 +3,7 @@
 CC ?= cc
 CPPFLAGS ?=
 # 32-byte loop alignment avoids placement-sensitive GCC/x86 sieve slowdowns.
-CFLAGS ?= -std=c99 -O3 -march=native -falign-loops=32
+CFLAGS ?= -O3 -march=native -falign-loops=32
 LDFLAGS ?=
 LDLIBS ?= -lgmp -lm
 PERL ?= perl

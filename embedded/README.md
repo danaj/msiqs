@@ -74,7 +74,7 @@ exceptions.
 A host with main() can be compiled from the repository root:
 
 ```sh
-cc -std=c99 -O3 -falign-loops=32 -Iembedded -o my-factor my-factor.c embedded/siqs.c embedded/lanczos.c embedded/pr32_iter.c embedded/tinyecm64.c -lgmp -lm
+cc -O3 -falign-loops=32 -Iembedded -o my-factor my-factor.c embedded/siqs.c embedded/lanczos.c embedded/pr32_iter.c embedded/tinyecm64.c -lgmp -lm
 ```
 
 
