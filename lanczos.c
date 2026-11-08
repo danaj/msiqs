@@ -79,6 +79,8 @@ typedef struct nla_pool_t nla_pool_t;
 
 typedef struct {
   const la_col_t *cols;
+  la_col_t *owned_cols;
+  uint32_t *owned_entries;
   unsigned long input_rows;
   unsigned long input_dense_rows;
   unsigned long ncols;
@@ -655,6 +657,41 @@ static int nla_input_dense_bit(const la_col_t *column,
   return (words[row >> 5] & ((uint32_t)1U << (row & 31UL))) != 0;
 }
 
+/* Column sorting can leave separately allocated payloads scattered through
+ * the heap.  Copy them into traversal order once, retaining the caller's
+ * immutable columns and the existing numerical kernels. */
+static void nla_compact_columns(nla_matrix_t *matrix) {
+  size_t entries = 0, position = 0;
+  size_t dense_words = matrix->input_dense_rows / 32U +
+                       (matrix->input_dense_rows % 32U != 0);
+  unsigned long column;
+
+  for (column = 0; column < matrix->ncols; column++) {
+    size_t words;
+    if ((size_t)matrix->cols[column].weight > (size_t)-1 - dense_words)
+      croak("lanczos: compact column size overflow");
+    words = (size_t)matrix->cols[column].weight + dense_words;
+    if (entries > (size_t)-1 - words)
+      croak("lanczos: compact matrix size overflow");
+    entries += words;
+  }
+  matrix->owned_cols = (la_col_t *)nla_malloc(matrix->ncols,
+                                             sizeof(*matrix->owned_cols));
+  matrix->owned_entries = (uint32_t *)nla_malloc(entries,
+                                               sizeof(*matrix->owned_entries));
+  for (column = 0; column < matrix->ncols; column++) {
+    const la_col_t *original = matrix->cols + column;
+    size_t words = (size_t)original->weight + dense_words;
+    matrix->owned_cols[column] = *original;
+    matrix->owned_cols[column].data = matrix->owned_entries + position;
+    if (words != 0)
+      memcpy(matrix->owned_entries + position, original->data,
+             words * sizeof(*matrix->owned_entries));
+    position += words;
+  }
+  matrix->cols = matrix->owned_cols;
+}
+
 static void nla_matrix_init(nla_matrix_t *matrix,
                             unsigned long nrows,
                             unsigned long dense_rows,
@@ -706,6 +743,7 @@ static void nla_matrix_init(nla_matrix_t *matrix,
    * at least 64 iteration rows for their fixed-size dense operations. */
   if (active < NLA_PACK_MIN_ROWS || active <= post_rows + 64U ||
       ncols > NLA_PACK_MAX_COLS) {
+    nla_compact_columns(matrix);
     free(counts);
     return;
   }
@@ -800,6 +838,8 @@ static void nla_matrix_init(nla_matrix_t *matrix,
 }
 
 static void nla_matrix_clear(nla_matrix_t *matrix) {
+  free(matrix->owned_entries);
+  free(matrix->owned_cols);
   free(matrix->row_columns);
   free(matrix->row_offsets);
   free(matrix->dense_bits);
