@@ -29,19 +29,42 @@ solve and is flushed after each result. Existing output files are not replaced.
 --verbose adds the solver's iteration diagnostics. --help lists all options.
 
 The tool defaults to 183590 rows and 183654 columns: the reduced RSA-110
-dimensions recorded in misc/siqs-timing-info.txt. It GENERATES an approximation,
-not RSA-110's actual relations. The default 50 +/- 16 sparse-tail entries per
-column, plus approximately nine frequent-head entries, are modelling choices,
-not measurements of that real matrix. --weight changes the tail density,
---head changes the frequent-head size, and --seed generates another matrix.
-For example, compare --weight 35, 50, and 70 to test sensitivity to density.
+dimensions recorded in misc/siqs-timing-info.txt. Generator v2 uses a broad
+frequent head and approximately inverse-row tail incidence. Its rounded head
+probabilities follow the captured d70/d80/RSA100 row profiles: 50% for rows 0..3,
+30% for 4..15, 15% for 16..31, 13% for 32..63, 12% for 64..111, 10% for 112..191,
+and 6% thereafter. The default head is min(256, rows/4). This gives materially
+occupied rows beyond the first 48 deferred rows, so the packed dense group
+represents useful work. The old head64 generator left mostly sparse rows
+there and understated packing's benefit.
 
-Tail hits mix uniform and lower-row-biased sampling; head incidence decays
-with row number. Two tail entries per column ensure each tail row occurs at
-least twice. Entries are distinct within each column; weights vary and columns
-are ordered as after production's reduction. There are no planted duplicate
-columns or known null vectors. This models a reduced sparse core rather than
-the raw relation matrix; generation and pre-solver pruning are not timed.
+Each column has one shared, right-skewed intensity: approximately
+3/8 + (5/2)*U*V for independent uniform U,V. It scales both the tail target
+and head probabilities; the first four head rows retain 50% incidence. Thus
+heavy columns tend to have denser heads too. The tail mean is approximately
+--weight (default 50), with possible targets from roughly 3/8 to 23/8 of it,
+rounded and bounded below by two. Default columns average about 80 entries,
+with a broader weight distribution than the old 50+/-16 tail. The head profile,
+weight spread and correlations approximate the captured matrices; these are
+generated workloads, not actual relations or exact rank-structure models.
+
+Tail hits choose logarithmic row buckets, with one eighth uniform sampling.
+Two distinct coverage hits per column ensure each tail row occurs at least
+twice. Entries are distinct within each column and stored in exact-size
+allocations; columns are ordered as after production's reduction. Matrix
+dimensions remain rows+64 columns, and no dependencies are planted. All
+sampling uses integer arithmetic and is deterministic for a given seed.
+--weight changes tail density, --head overrides the frequent-head size, and
+--seed generates another matrix. For example, compare --weight 35, 50, 70 to
+test density sensitivity. The requested mean must fit the tail; sampled
+targets are capped at the tail size for small or unusually dense matrices.
+Generation is not timed.
+
+The log identifies generator v2 and reports the column-weight range/standard
+deviation and actual ranked incidence in rows 0..47 and 48..111. The latter
+64-row band contributes about 7.8 entries/column by default, compared with
+6.6, 13.3, 7.3 in the three captures. Synthetic results remain a useful size
+sweep; --matrix supplies exact real workloads for checking conclusions.
 
 Timed work includes the normal matrix conversion, pool creation, complete
 block-Lanczos iteration, dependency extraction/verification inside the solver,
@@ -71,3 +94,31 @@ per solver worker: at the default size, roughly 1.4 MiB per worker in addition
 to shared matrix/solver storage. Oversubscribed CPUs and NUMA placement can
 strongly change results. The tool does not pin threads or select a production
 thread limit automatically.
+
+Exact reduced matrices
+----------------------
+
+Use --matrix FILE to benchmark actual reduced columns without generation:
+  ./bench-lanczos --matrix /private/tmp/d80-s1.matrix --max-threads 8 --repeat 3 --output real-matrix.tsv
+
+--matrix rejects explicit --rows, --weight, --head, and --seed. Existing
+--max-threads, --repeat, --output, and --verbose options remain available.
+The stored row and column counts are used exactly, including empty rows and
+column counts that differ from rows + 64. Columns retain their supplied order,
+weights, original identifiers, and repeated indices. The solver still uses
+its fixed RNG seed and independently verifies all dependency vectors.
+
+LCMAT001 is a regular binary file: eight ASCII bytes LCMAT001, followed by
+little-endian uint32 row count, column count, and dense-row count (must be zero).
+Each ordered column contains uint32 weight, original column identifier, then
+weight uint32 row indices. Dimensions must be nonzero; indices must be less
+than the row count. Invalid magic, bitmap rows, allocation-size overflow,
+truncation, and trailing bytes are rejected before solving. This is the output
+format of the disposable reduced-matrix capture tools; no journal replay or
+SIQS work is performed by this benchmark.
+
+Loading and hashing happen before solver timers. The log records the path,
+exact dimensions, entry count, and FNV-1a 64-bit hash of every input byte.
+TSV tail_weight, head, and seed are zero for --matrix inputs because these
+synthetic-generation parameters do not apply. The TSV columns are unchanged.
+The default synthetic generator and its options retain their existing behavior.

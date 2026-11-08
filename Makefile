@@ -43,7 +43,7 @@ tuned: bench-sieve tools/siqs-autotune.pl
 tuned8:
 	$(MAKE) tuned TUNE_ARGS='--threads 8'
 
-bench-lanczos: tools/lanczos-bench.c lanczos.c lanczos.h planczos_inc.c ptypes.h $(BUILD_DEPS) Makefile
+bench-lanczos: tools/lanczos-bench.c tools/lanczos-bench-matrix.h lanczos.c lanczos.h planczos_inc.c ptypes.h $(BUILD_DEPS) Makefile
 	@$(BUILD) --ldlibs "-lm" --output $@ tools/lanczos-bench.c
 
 bench-solvers: tools/siqs-la-bench.c $(BENCH_DEPS) $(BUILD_DEPS) Makefile

@@ -1,6 +1,6 @@
 /*
  * Standalone block-Lanczos scaling benchmark.  See README-lanczos-bench.txt.
- * Uses synthetic QS-like columns, not a factorization or a stored QS matrix.
+ * Uses synthetic QS-like columns or a supplied reduced matrix file.
  * Including the solver exposes its actual pool size and unchanged recurrence;
  * no instrumentation or benchmark hooks are needed in production sources.
  *
@@ -13,6 +13,7 @@
 #endif
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <sys/resource.h>
 #include <time.h>
 #include <unistd.h>
@@ -26,6 +27,8 @@
 #define NLA_MAX_THREADS 256U
 #endif
 #include "../lanczos.c"
+
+#include "lanczos-bench-matrix.h"
 
 static int bench_verbose;
 
@@ -69,50 +72,97 @@ static double bench_cpu(void) {
        + ((double)usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1e6;
 }
 
-/* A reduced-core approximation: varying column weights; frequent small-prime
- * rows; a mostly uniform sparse tail with a minority of lower-row-biased hits.
+/* Rounded incidence bands from the captured reduced matrices. The broad
+ * shoulder matters: packing defers 48 rows, then handles another 64 densely. */
+static uint32_t bench_head_percent(uint32_t row) {
+  return row < 4U ? 50U : row < 16U ? 30U : row < 32U ? 15U :
+         row < 64U ? 13U : row < 112U ? 12U : row < 192U ? 10U : 6U;
+}
+
+static uint64_t bench_max_tail(uint32_t weight) {
+  uint64_t maximum = ((uint64_t)weight * 735U + 128U) / 256U;
+  return maximum < 2U ? 2U : maximum;
+}
+
+static unsigned int bench_log2(uint32_t value) {
+  unsigned int bit = 0;
+  while ((value >>= 1) != 0) bit++;
+  return bit;
+}
+
+/* A reduced-core approximation: a broad frequent head, approximately 1/row
+ * tail incidence, and correlated, right-skewed head/tail column weights.
  * Two distinct tail rows per column ensure that every tail row occurs at least
  * twice, without planting dependencies, duplicate columns, or an easy block
  * decomposition.  All entries (including the head) use ordinary sparse indices,
  * just as siqs_build_matrix does; input_dense_rows is zero. */
 static la_col_t *bench_matrix(uint32_t rows, uint32_t count, uint32_t weight,
                               uint32_t head, uint32_t seed, size_t *entries) {
-  uint32_t c, row, width = weight / 3U, tail = rows - head;
+  uint32_t c, row, tail = rows - head;
+  uint64_t maximum = bench_max_tail(weight);
+  unsigned int low_bit = bench_log2(head + 1U);
+  unsigned int levels = bench_log2(rows) - low_bit + 1U;
   uint32_t random_state = seed;
+  uint32_t *data = (uint32_t *)nla_malloc((size_t)(maximum < tail ? maximum : tail) + head,
+                                           sizeof(*data));
   uint32_t *marks = (uint32_t *)nla_calloc(rows, sizeof(*marks));
   uint32_t *counts = (uint32_t *)nla_calloc(rows, sizeof(*counts));
   la_col_t *cols = (la_col_t *)nla_calloc(count, sizeof(*cols));
   uint32_t min_count = UINT32_MAX, max_count = 0, inactive = 0;
+  uint32_t min_weight = UINT32_MAX, max_weight = 0;
+  uint64_t post_entries = 0, dense_entries = 0;
+  double weight_squares = 0;
   *entries = 0;
   for (c = 0; c < count; c++) {
     uint32_t i, n = 0, token = c + 1U;
-    uint32_t target = weight - width + bench_random(&random_state) % (2U * width + 1U);
-    uint32_t *data = (uint32_t *)nla_malloc(target + head, sizeof(*data));
+    uint32_t u = bench_random(&random_state) & 0xffffU;
+    uint32_t v = bench_random(&random_state) & 0xffffU;
+    /* 3/8 + (5/2)*U*V: mean near one, with a long upper weight tail.
+     * Integer arithmetic makes generated inputs reproducible across hosts. */
+    uint32_t intensity = 96U + (uint32_t)(((uint64_t)u * v * 640U) >> 32);
+    uint64_t scaled = ((uint64_t)weight * intensity + 128U) / 256U;
+    uint32_t target = scaled < tail ? (uint32_t)scaled : tail;
+    if (target < 2U) target = 2U;
     data[n++] = head + c % tail;
     data[n++] = head + (uint32_t)(((uint64_t)c + tail / 2U) % tail);
     marks[data[0]] = marks[data[1]] = token;
     while (n < target) {
-      uint32_t offset = bench_random(&random_state) % tail;
-      if ((bench_random(&random_state) & 3U) == 0)
-        offset = (uint32_t)((uint64_t)offset * (bench_random(&random_state) % tail) / tail);
-      row = head + offset;
+      if ((bench_random(&random_state) & 7U) == 0 || tail < rows / 4U) {
+        row = head + bench_random(&random_state) % tail;
+      } else {
+        uint32_t sample;
+        /* Equal logarithmic buckets, with rejection at partial endpoints.
+         * The uniform component and two coverage hits keep a sparse core. */
+        do {
+          unsigned int bit = low_bit + bench_random(&random_state) % levels;
+          uint32_t base = (uint32_t)1U << bit;
+          sample = base + (bench_random(&random_state) & (base - 1U));
+        } while (sample <= head || sample > rows);
+        row = sample - 1U;
+      }
       if (marks[row] != token) {
         marks[row] = token;
         data[n++] = row;
       }
     }
     for (row = 0; row < head; row++)
-      if (bench_random(&random_state) % (2U + row / 4U) == 0)
+      if (bench_random(&random_state) % 25600U <
+          bench_head_percent(row) * (row < 4U ? 256U : intensity))
         data[n++] = row;
     qsort(data, n, sizeof(*data), bench_compare_u32);
     cols[c].orig = c;
     cols[c].weight = n;
-    cols[c].data = data;
+    cols[c].data = (uint32_t *)nla_malloc(n, sizeof(*data));
+    memcpy(cols[c].data, data, (size_t)n * sizeof(*data));
+    if (n < min_weight) min_weight = n;
+    if (n > max_weight) max_weight = n;
+    weight_squares += (double)n * n;
     if ((size_t)n > (size_t)-1 - *entries)
       croak("bench-lanczos: matrix weight overflow");
     *entries += n;
     for (i = 0; i < n; i++) counts[data[i]]++;
   }
+  free(data);
   for (row = 0; row < rows; row++) {
     if (counts[row] == 0) inactive++;
     if (counts[row] < min_count) min_count = counts[row];
@@ -122,6 +172,18 @@ static la_col_t *bench_matrix(uint32_t rows, uint32_t count, uint32_t weight,
          rows, count, (unsigned long)*entries, (double)*entries / count);
   printf("Row incidence: min %u, max %u, unused %u; head %u rows; seed %u\n",
          min_count, max_count, inactive, head, seed);
+  qsort(counts, rows, sizeof(*counts), bench_compare_u32);
+  for (row = 0; row < rows && row < 112U; row++) {
+    if (row < 48U) post_entries += counts[rows - 1U - row];
+    else dense_entries += counts[rows - 1U - row];
+  }
+  {
+    double mean = (double)*entries / count;
+    double variance = weight_squares / count - mean * mean;
+    printf("Generator v2: column weights %u..%u, SD %.2f; ranked rows 0..47 %.2f/column, 48..111 %.2f/column\n",
+           min_weight, max_weight, sqrt(variance > 0 ? variance : 0),
+           (double)post_entries / count, (double)dense_entries / count);
+  }
   /* This is the column ordering passed to Lanczos after la_reduce_matrix. */
   qsort(cols, count, sizeof(*cols), nla_compare_columns);
   free(counts);
@@ -212,9 +274,10 @@ static void bench_usage(void) {
   printf("Usage: bench-lanczos [options]\n"
     "  --max-threads N  Sweep 1,2,4,8,...,N (default 8; includes exact N).\n"
     "  --repeat N       Runs per count (default 1; alternate sweep direction).\n"
+    "  --matrix FILE    Load an exact LCMAT001 reduced matrix instead of generating.\n"
     "  --rows N         Matrix rows (default 183590, observed RSA-110 size).\n"
     "  --weight N       Mean sparse-tail entries per column (default 50).\n"
-    "  --head N         Frequent small-prime rows (default 64).\n"
+    "  --head N         Frequent head rows (default min(256, rows/4)).\n"
     "  --seed N         Nonzero matrix seed (default 1).\n"
     "  --output FILE    Write per-solve TSV; refuses to overwrite a file.\n"
     "  --verbose        Also print the solver's iteration diagnostics.\n"
@@ -222,17 +285,18 @@ static void bench_usage(void) {
 }
 
 int main(int argc, char **argv) {
-  uint32_t rows = 183590U, weight = 50U, head = 64U, seed = 1U;
+  uint32_t rows = 183590U, weight = 50U, head = 256U, seed = 1U;
   uint32_t maximum = 8U, repeats = 1U, counts[33], ncounts = 0, count;
   uint32_t repeat, point, c;
   size_t entries;
-  const char *output = NULL;
+  const char *output = NULL, *matrix_path = NULL;
+  uint64_t matrix_hash = 0;
   FILE *tsv = NULL;
   la_col_t *cols;
   bench_result_t *runs;
   uint64_t *reference = NULL, reference_mask = 0;
   double *times, serial_median;
-  int arg;
+  int arg, shape_given = 0, head_given = 0;
   for (arg = 1; arg < argc; arg++) {
     const char *option = argv[arg];
     uint32_t value;
@@ -240,22 +304,34 @@ int main(int argc, char **argv) {
     if (strcmp(option, "--verbose") == 0) { bench_verbose = 1; continue; }
     if (++arg == argc) croak("bench-lanczos: missing value for %s", option);
     if (strcmp(option, "--output") == 0) { output = argv[arg]; continue; }
+    if (strcmp(option, "--matrix") == 0) { matrix_path = argv[arg]; continue; }
+    if (strcmp(option, "--rows") == 0 || strcmp(option, "--weight") == 0 ||
+        strcmp(option, "--head") == 0 || strcmp(option, "--seed") == 0)
+      shape_given = 1;
     value = bench_number(argv[arg]);
     if      (strcmp(option, "--max-threads") == 0) maximum = value;
     else if (strcmp(option, "--repeat") == 0) repeats = value;
     else if (strcmp(option, "--rows") == 0) rows = value;
     else if (strcmp(option, "--weight") == 0) weight = value;
-    else if (strcmp(option, "--head") == 0) head = value;
+    else if (strcmp(option, "--head") == 0) { head = value; head_given = 1; }
     else if (strcmp(option, "--seed") == 0) seed = value;
     else croak("bench-lanczos: unknown option: %s", option);
   }
   if (maximum == 0 || maximum > NLA_MAX_THREADS)
     croak("bench-lanczos: max threads must be 1..%u", (unsigned int)NLA_MAX_THREADS);
-  if (repeats == 0 || seed == 0 || weight < 2U || rows < 128U ||
+  if (repeats == 0) croak("bench-lanczos: repeat count must be nonzero");
+  if (matrix_path != NULL && shape_given)
+    croak("bench-lanczos: --matrix cannot be combined with --rows, --weight, --head, or --seed");
+  if (!head_given) head = rows / 4U < 256U ? rows / 4U : 256U;
+  if (matrix_path == NULL && (seed == 0 || weight < 2U || rows < 128U ||
       rows > UINT32_MAX - 64U || head >= rows ||
-      (uint64_t)weight + weight / 3U > rows - head)
-    croak("bench-lanczos: invalid size, weight, head, seed, or repeat count");
-  count = rows + 64U;
+      weight > rows - head))
+    croak("bench-lanczos: invalid size, weight, head, or seed");
+  count = matrix_path == NULL ? rows + 64U : 0;
+  if (matrix_path != NULL) {
+    cols = bench_load_matrix(matrix_path, &rows, &count, &entries, &matrix_hash);
+    weight = head = seed = 0;
+  }
   counts[ncounts++] = 1U;
   for (c = 2U; c <= maximum; c *= 2U) {
     counts[ncounts++] = c;
@@ -276,8 +352,13 @@ int main(int argc, char **argv) {
     fflush(tsv);
   }
   setvbuf(stdout, NULL, _IOLBF, 0);
-  cols = bench_matrix(rows, count, weight, head, seed, &entries);
-  printf("Full solves, excluding generation/independent verification; cap %u.\n",
+  if (matrix_path == NULL)
+    cols = bench_matrix(rows, count, weight, head, seed, &entries);
+  else
+    printf("Matrix input: %s; %u rows x %u columns, %lu entries; FNV-1a64 %08lx%08lx\n",
+           matrix_path, rows, count, (unsigned long)entries,
+           (unsigned long)(matrix_hash >> 32), (unsigned long)(matrix_hash & UINT64_C(0xffffffff)));
+  printf("Full solves, excluding input generation/loading and independent verification; cap %u.\n",
          (unsigned int)NLA_MAX_THREADS);
   runs = (bench_result_t *)nla_calloc((size_t)ncounts * repeats, sizeof(*runs));
   times = (double *)nla_malloc(repeats, sizeof(*times));
