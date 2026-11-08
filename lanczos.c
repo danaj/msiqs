@@ -1041,7 +1041,13 @@ static void nla_matrix_mul(const nla_matrix_t *matrix,
                               data + weight : NULL;
       uint64_t value = input[column];
       unsigned long i, row;
-      for (i = 0; i < weight; i++)
+      for (i = 0; weight - i >= 4U; i += 4U) {
+        output[data[i]] ^= value;
+        output[data[i + 1U]] ^= value;
+        output[data[i + 2U]] ^= value;
+        output[data[i + 3U]] ^= value;
+      }
+      for (; i < weight; i++)
         output[data[i]] ^= value;
       for (row = 0; row < input_dense_rows; row++)
         if (dense[row >> 5] & ((uint32_t)1U << (row & 31UL)))
@@ -1115,6 +1121,12 @@ static void nla_matrix_mul_transpose(const nla_matrix_t *matrix,
     size_t i = row_offsets[sparse_row];
     size_t end = row_offsets[sparse_row + 1U];
     uint64_t value = input[dense_rows + sparse_row];
+    for (; end - i >= 4U; i += 4U) {
+      output[row_columns[i]] ^= value;
+      output[row_columns[i + 1U]] ^= value;
+      output[row_columns[i + 2U]] ^= value;
+      output[row_columns[i + 3U]] ^= value;
+    }
     for (; i < end; i++)
       output[row_columns[i]] ^= value;
   }
