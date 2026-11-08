@@ -21,7 +21,7 @@
 #if !defined(PSIQS)
 #error "Build bench-lanczos with -DPSIQS -pthread"
 #endif
-/* The benchmark may explore beyond production's provisional 32-thread cap.
+/* --force-threads may explore beyond the production policy and pool cap.
  * This does not change the solver cap in the SIQS and parallel builds. */
 #ifndef NLA_MAX_THREADS
 #define NLA_MAX_THREADS 256U
@@ -31,6 +31,7 @@
 #include "lanczos-bench-matrix.h"
 
 static int bench_verbose;
+static int bench_force_threads;
 
 typedef struct {
   uint32_t requested, effective, attempts, dependencies;
@@ -207,7 +208,9 @@ static uint64_t *bench_solve(uint32_t rows, uint32_t count, la_col_t *cols,
   run->requested = threads;
   run->effective = 1U;
   *mask = 0;
-  nla_matrix_init(&matrix, rows, 0, count, cols, NLA_POST_ROWS, bench_verbose ? 3 : 0);
+  if (!bench_force_threads && threads > 1U && NLA_MAX_THREADS > 1U)
+    threads = nla_max_threads_for_size(count, nla_input_entries(count, 0, cols), threads);
+  nla_matrix_init(&matrix, rows, 0, count, cols, NLA_POST_ROWS, threads, bench_verbose ? 3 : 0);
   run->packed = matrix.packed;
   matrix.pool = nla_pool_create(&matrix, threads);
   if (matrix.pool != NULL) run->effective = matrix.pool->nthreads;
@@ -226,7 +229,7 @@ static uint64_t *bench_solve(uint32_t rows, uint32_t count, la_col_t *cols,
 }
 
 /* Independent scalar check, outside the timer.  Check A*X=0, nonempty lanes,
- * and lane independence; also compare bit-for-bit with the serial solve. */
+ * and lane independence; main also compares solves using the same format. */
 static uint32_t bench_verify(uint32_t rows, uint32_t count, const la_col_t *cols,
                              const uint64_t *result, uint64_t mask) {
   uint32_t c, i, dependencies = 0;
@@ -273,6 +276,7 @@ static uint32_t bench_number(const char *text) {
 static void bench_usage(void) {
   printf("Usage: bench-lanczos [options]\n"
     "  --max-threads N  Sweep 1,2,4,8,...,N (default 8; includes exact N).\n"
+    "  --force-threads  Bypass the production thread policy for scaling tests.\n"
     "  --repeat N       Runs per count (default 1; alternate sweep direction).\n"
     "  --matrix FILE    Load an exact LCMAT001 reduced matrix instead of generating.\n"
     "  --rows N         Matrix rows (default 183590, observed RSA-110 size).\n"
@@ -281,7 +285,7 @@ static void bench_usage(void) {
     "  --seed N         Nonzero matrix seed (default 1).\n"
     "  --output FILE    Write per-solve TSV; refuses to overwrite a file.\n"
     "  --verbose        Also print the solver's iteration diagnostics.\n"
-    "Build thread cap: %u (production cap is unchanged).\n", (unsigned int)NLA_MAX_THREADS);
+    "Build thread cap: %u (production policy normally selects at most 24).\n", (unsigned int)NLA_MAX_THREADS);
 }
 
 int main(int argc, char **argv) {
@@ -294,7 +298,7 @@ int main(int argc, char **argv) {
   FILE *tsv = NULL;
   la_col_t *cols;
   bench_result_t *runs;
-  uint64_t *reference = NULL, reference_mask = 0;
+  uint64_t *reference[2] = {NULL, NULL}, reference_mask[2] = {0, 0};
   double *times, serial_median;
   int arg, shape_given = 0, head_given = 0;
   for (arg = 1; arg < argc; arg++) {
@@ -302,6 +306,7 @@ int main(int argc, char **argv) {
     uint32_t value;
     if (strcmp(option, "--help") == 0) { bench_usage(); return 0; }
     if (strcmp(option, "--verbose") == 0) { bench_verbose = 1; continue; }
+    if (strcmp(option, "--force-threads") == 0) { bench_force_threads = 1; continue; }
     if (++arg == argc) croak("bench-lanczos: missing value for %s", option);
     if (strcmp(option, "--output") == 0) { output = argv[arg]; continue; }
     if (strcmp(option, "--matrix") == 0) { matrix_path = argv[arg]; continue; }
@@ -358,8 +363,9 @@ int main(int argc, char **argv) {
     printf("Matrix input: %s; %u rows x %u columns, %lu entries; FNV-1a64 %08lx%08lx\n",
            matrix_path, rows, count, (unsigned long)entries,
            (unsigned long)(matrix_hash >> 32), (unsigned long)(matrix_hash & UINT64_C(0xffffffff)));
-  printf("Full solves, excluding input generation/loading and independent verification; cap %u.\n",
-         (unsigned int)NLA_MAX_THREADS);
+  printf("Full solves, excluding input generation/loading and independent verification; build cap %u; %s.\n",
+         (unsigned int)NLA_MAX_THREADS,
+         bench_force_threads ? "forced thread counts" : "production thread policy");
   runs = (bench_result_t *)nla_calloc((size_t)ncounts * repeats, sizeof(*runs));
   times = (double *)nla_malloc(repeats, sizeof(*times));
   for (repeat = 0; repeat < repeats; repeat++) {
@@ -367,20 +373,25 @@ int main(int argc, char **argv) {
       uint32_t index = repeat % 2U ? ncounts - 1U - point : point;
       bench_result_t *run = runs + (size_t)index * repeats + repeat;
       uint64_t mask, *result;
+      unsigned int format;
       printf("BEGIN repeat %u/%u, threads %u\n", repeat + 1U, repeats, counts[index]);
       result = bench_solve(rows, count, cols, counts[index], run, &mask);
       run->dependencies = bench_verify(rows, count, cols, result, mask);
-      if (reference == NULL) { reference = result; reference_mask = mask; }
+      format = run->packed ? 1U : 0U;
+      if (reference[format] == NULL) {
+        reference[format] = result;
+        reference_mask[format] = mask;
+      }
       else {
-        if (mask != reference_mask ||
-            memcmp(result, reference, (size_t)count * sizeof(*result)) != 0)
-          croak("bench-lanczos: solve differs from the serial reference");
+        if (mask != reference_mask[format] ||
+            memcmp(result, reference[format], (size_t)count * sizeof(*result)) != 0)
+          croak("bench-lanczos: solve differs from the same-format reference");
         free(result);
       }
       printf("DONE  threads %u (actual %u): %.3f wall, %.3f CPU, %u dependencies, %u attempt(s)%s\n",
         run->requested, run->effective, run->wall, run->cpu,
         run->dependencies, run->attempts,
-        run->effective != run->requested ? " [SERIAL FALLBACK]" : "");
+        run->effective == run->requested ? "" : run->effective == 1U ? " [SERIAL]" : " [CAPPED]");
       if (tsv != NULL) {
         fprintf(tsv, "%u\t%u\t%lu\t%u\t%u\t%u\t%u\t%u\t%u\t%d\t%.9f\t%.9f\t%u\t%u\t1\n",
           rows, count, (unsigned long)entries, weight, head, seed, repeat + 1U,
@@ -410,7 +421,7 @@ int main(int argc, char **argv) {
       counts[point], effective, median, low, high, serial_median / median, cpu);
   }
   if (tsv != NULL && fclose(tsv) != 0) croak("bench-lanczos: TSV close failed");
-  free(reference); free(runs); free(times);
+  free(reference[0]); free(reference[1]); free(runs); free(times);
   for (c = 0; c < count; c++) free(cols[c].data);
   free(cols);
   return 0;

@@ -157,8 +157,28 @@ Set `retain_all_rows = 1` for the wide behavior. The count includes the
 calling thread; workers are joined before the call returns. Each call owns
 its pool, so concurrent calls can oversubscribe CPU and memory.
 
-Small or internally packed matrices use serial execution, as does failed
-pool setup. Requests are capped at `NLA_MAX_THREADS`, normally 32; override
+The size/entry-count policy caps requests at 1, 4, 8, 16, or 24 workers;
+the requested count remains an upper bound. For example, a request for 2
+can select 2 workers. Worker selection precedes internal format selection.
+Serial packing defaults to disabled on x86 and a cutoff of 18432 columns
+otherwise; `-DNLA_PACK_MAX_COLS=N` overrides that cutoff. Parallel solves use
+the unpacked format. Failed pool setup falls back to serial execution.
+
+The first column counts selecting each cap are:
+
+| Default | 4 workers | 8 workers | 16 workers | 24 workers |
+| --- | ---: | ---: | ---: | ---: |
+| x86 | 6144 | 12288 | 49152 | 393216 |
+| Other | 6144 | 24576 | 49152 | 393216 |
+
+Smaller matrices select one worker. Other targets also select one worker
+at 450000 entries or fewer. On x86, matrices with 8192–12287 columns and
+at least 900000 entries select the 8-worker cap early. Entries count original
+sparse indices and set dense-head bits. These are coarse measured defaults;
+the larger 16/24-worker steps come from AMD measurements, while the ARM
+measurements covered requests through 8 workers.
+
+The pool's additional hard limit is `NLA_MAX_THREADS`, normally 32; override
 it when compiling the solver if needed. Each pool thread needs roughly
 `8 * nrows` bytes of row scratch plus smaller buffers. For scaling
 measurements, see [the Lanczos benchmark](../tools/README-lanczos-bench.txt).

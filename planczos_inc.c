@@ -17,7 +17,7 @@
 /* Sparse gathers/scatters soon become bandwidth limited.  Bound the initial
  * pool and its per-worker row storage independently of the sieve threads. */
 #ifndef NLA_MAX_THREADS
-/* Provisional cap; fewer workers may be faster. Revisit after scaling tests. */
+/* Allocation limit; the measured size policy selects at most 24 workers. */
 #define NLA_MAX_THREADS 32U
 #endif
 #if NLA_MAX_THREADS < 1
@@ -170,8 +170,7 @@ static nla_pool_t *nla_pool_create(const nla_matrix_t *matrix, uint32_t nthreads
   uint64_t total = 0, cumulative = 0;
   unsigned long column = 0;
   uint32_t t;
-  if (nthreads < 2U || matrix->packed || matrix->ncols <= NLA_PACK_MAX_COLS ||
-      matrix->input_rows == 0)
+  if (nthreads < 2U || matrix->packed || matrix->input_rows == 0)
     return NULL;
   if (nthreads > NLA_MAX_THREADS)
     nthreads = NLA_MAX_THREADS;

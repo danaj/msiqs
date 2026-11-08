@@ -51,14 +51,23 @@
 #define NLA_EXTRA_COLUMNS 64UL
 #define NLA_MAX_ATTEMPTS 100U
 
-/* Packing pays for its conversion at about 1024 active rows and is fastest
- * across the matrix sizes SIQS commonly reaches.  By roughly 40K columns the
- * input's column layout is faster.  A round 32K crossover avoids a second
- * packed format.  On the measured SIQS workloads near this crossover,
- * subsecond linear-algebra differences are immaterial next to the sieving
- * time; the upper cutoff also keeps the representation and kernels simple. */
+/* Measured serial defaults: unpacked columns generally win on x86, while
+ * packing helps ARM through roughly 18K columns.  Match the sieve-block
+ * architecture split, with a build override for other machines. */
+#if !defined(_M_ARM64EC) && (defined(__i386__) || defined(__x86_64__) || \
+                            defined(_M_IX86) || defined(_M_X64))
+#define NLA_X86_DEFAULTS 1
+#else
+#define NLA_X86_DEFAULTS 0
+#endif
 #define NLA_PACK_MIN_ROWS 1024UL
-#define NLA_PACK_MAX_COLS 32768UL
+#ifndef NLA_PACK_MAX_COLS
+#if NLA_X86_DEFAULTS
+#define NLA_PACK_MAX_COLS 0UL
+#else
+#define NLA_PACK_MAX_COLS 18432UL
+#endif
+#endif
 #define NLA_POST_ROWS 48U
 #define NLA_PACKED_DENSE_ROWS 64U
 #define NLA_DENSE_PANEL_BITS 8U
@@ -697,7 +706,8 @@ static void nla_matrix_init(nla_matrix_t *matrix,
                             unsigned long dense_rows,
                             unsigned long ncols,
                             const la_col_t *cols,
-                            unsigned int post_rows, int verbose) {
+                            unsigned int post_rows, uint32_t nthreads,
+                            int verbose) {
   uint32_t *counts;
   uint32_t *row_map;
   nla_row_info_t *row_info;
@@ -738,10 +748,11 @@ static void nla_matrix_init(nla_matrix_t *matrix,
       active++;
   matrix->active_rows = active;
 
-  /* Small matrices avoid conversion overhead and use the input columns.  The
-   * second test also guarantees that packed matrix-vector kernels always have
+  /* Parallel solves use columns regardless of the serial packing cutoff.
+   * Small matrices also avoid conversion overhead.  The active-row test
+   * guarantees that packed matrix-vector kernels always have
    * at least 64 iteration rows for their fixed-size dense operations. */
-  if (active < NLA_PACK_MIN_ROWS || active <= post_rows + 64U ||
+  if (nthreads > 1U || active < NLA_PACK_MIN_ROWS || active <= post_rows + 64U ||
       ncols > NLA_PACK_MAX_COLS) {
     nla_compact_columns(matrix);
     free(counts);
@@ -1134,6 +1145,54 @@ static void nla_matrix_mul_transpose(const nla_matrix_t *matrix,
 
 #ifdef PSIQS
 #include "planczos_inc.c"
+
+/* Count original nonzeros, including dense-head bits, for the size policy.
+ * Packed/deferred weights and pool partition costs measure different work. */
+static uint64_t nla_input_entries(unsigned long ncols,
+                                   unsigned long dense_rows,
+                                   const la_col_t *cols) {
+  uint64_t total = 0;
+  unsigned long column, row;
+  for (column = 0; column < ncols; column++) {
+    uint64_t weight = cols[column].weight;
+    for (row = 0; row < dense_rows; row++)
+      weight += nla_input_dense_bit(cols + column, row);
+    if (weight > UINT64_MAX - total)
+      croak("lanczos: matrix weight overflow");
+    total += weight;
+  }
+  return total;
+}
+
+/* Full-solve wall-time defaults from ARM and 48-core AMD measurements.
+ * The 16/24-worker tail is shared; ARM measurements covered budgets to 8.
+ * These are coarse crossovers, independent of the serial packing cutoff. */
+static uint32_t nla_max_threads_for_size(unsigned long ncols, uint64_t entries,
+                                          uint32_t requested) {
+  uint32_t cap;
+  if (requested < 2U || ncols < 6144UL)
+    return 1U;
+#if !NLA_X86_DEFAULTS
+  if (entries <= UINT64_C(450000))
+    return 1U;
+#endif
+  if (ncols >= 393216UL)
+    cap = 24U;
+  else if (ncols >= 49152UL)
+    cap = 16U;
+#if NLA_X86_DEFAULTS
+  else if (ncols >= 12288UL ||
+           (ncols >= 8192UL && entries >= UINT64_C(900000)))
+#else
+  else if (ncols >= 24576UL)
+#endif
+    cap = 8U;
+  else
+    cap = 4U;
+  if (cap > NLA_MAX_THREADS)
+    cap = NLA_MAX_THREADS;
+  return requested < cap ? requested : cap;
+}
 #endif
 
 /* The serial kernels also serve packed matrices and serial-only builds. */
@@ -1654,15 +1713,27 @@ static uint64_t *nla_block_lanczos(unsigned long nrows,
   *mask = 0;
   if (ncols == 0)
     return NULL;
-  nla_matrix_init(&matrix, nrows, dense_rows, ncols, cols, post_rows, verbose);
+  if (dense_rows > nrows)
+    croak("lanczos: dense row count exceeds matrix row count");
+  if (nrows > UINT32_MAX || ncols > UINT32_MAX)
+    croak("lanczos: matrix dimensions exceed internal index range");
+#ifdef PSIQS
+  if (nthreads > 1U && NLA_MAX_THREADS > 1U)
+    nthreads = nla_max_threads_for_size(ncols,
+                  nla_input_entries(ncols, dense_rows, cols), nthreads);
+  else
+    nthreads = 1U;
+#else
+  nthreads = 1U;
+#endif
+  nla_matrix_init(&matrix, nrows, dense_rows, ncols, cols, post_rows,
+                    nthreads, verbose);
 #ifdef PSIQS
   matrix.pool = nla_pool_create(&matrix, nthreads);
   if (matrix.pool != NULL && verbose > 0) {
     printf("Lanczos using %u threads\n", matrix.pool->nthreads);
     fflush(stdout);
   }
-#else
-  (void)nthreads;
 #endif
   for (attempt = 0; attempt < NLA_MAX_ATTEMPTS; attempt++) {
     result = nla_block_lanczos_once(&matrix, &rng_state, mask, verbose);

@@ -161,8 +161,69 @@ static void matrix_verify_dependencies(unsigned long rows, unsigned long count,
   free(parity);
 }
 
+#ifdef PSIQS
+static void matrix_thread_policy(void) {
+  static const struct {
+    unsigned long columns;
+    uint64_t entries;
+    uint32_t cap;
+  } cases[] = {
+    {4096UL, UINT64_C(600000), 1U},
+    {6143UL, UINT64_C(600000), 1U},
+    {6144UL, UINT64_C(600000), 4U},
+#if NLA_X86_DEFAULTS
+    {8191UL, UINT64_C(900000), 4U},
+    {8192UL, UINT64_C(899999), 4U},
+    {8192UL, UINT64_C(900000), 8U},
+    {12287UL, UINT64_C(600000), 4U},
+    {12287UL, UINT64_C(900000), 8U},
+    {12288UL, UINT64_C(600000), 8U},
+#else
+    {6144UL, UINT64_C(450000), 1U},
+    {6144UL, UINT64_C(450001), 4U},
+    {12288UL, UINT64_C(600000), 4U},
+    {24575UL, UINT64_C(600000), 4U},
+    {24576UL, UINT64_C(600000), 8U},
+    {524288UL, UINT64_C(450000), 1U},
+#endif
+    {49151UL, UINT64_C(600000), 8U},
+    {49152UL, UINT64_C(600000), 16U},
+    {393215UL, UINT64_C(600000), 16U},
+    {393216UL, UINT64_C(600000), 24U},
+    {524288UL, UINT64_C(600000), 24U},
+    {UINT32_MAX, UINT64_MAX, 24U}
+  };
+  static const uint32_t budgets[] = {0U, 1U, 2U, 3U, 4U, 8U, 16U, 24U,
+                                      32U, UINT32_MAX};
+  uint32_t dense0[] = {37U, 99U, UINT32_C(0x80000001), UINT32_C(0xffffffe3)};
+  uint32_t dense1[] = {UINT32_MAX, UINT32_MAX};
+  la_col_t cols[2];
+  unsigned int i, j;
+  case_name = "lanczos-thread-policy-boundaries-and-request-clamps";
+  for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    for (j = 0; j < sizeof(budgets) / sizeof(budgets[0]); j++) {
+      uint32_t expected = cases[i].cap;
+      if (budgets[j] == 0U) expected = 1U;
+      else if (expected > budgets[j]) expected = budgets[j];
+      if (expected > NLA_MAX_THREADS) expected = NLA_MAX_THREADS;
+      CHECK(nla_max_threads_for_size(cases[i].columns, cases[i].entries,
+                                    budgets[j]) == expected);
+    }
+  }
+  case_name = "lanczos-policy-counts-original-sparse-and-dense-nonzeros";
+  memset(cols, 0, sizeof(cols));
+  cols[0].weight = 2U; cols[0].data = dense0;
+  cols[1].weight = 0U; cols[1].data = dense1;
+  CHECK(nla_input_entries(2UL, 37UL, cols) == UINT64_C(43));
+  CHECK(nla_input_entries(2UL, 0UL, cols) == UINT64_C(2));
+  CHECK(nla_input_entries(0UL, 37UL, NULL) == UINT64_C(0));
+  puts("PASS matrix: Lanczos policy boundaries, requested-thread caps and original nonzero accounting");
+}
+#endif
+
 static void matrix_kernel_case(unsigned long rows, unsigned long count,
-                                unsigned long dense, unsigned int post) {
+                                unsigned long dense, unsigned int post,
+                                uint32_t setup_threads) {
   la_col_t *cols = matrix_fixture(rows, count, dense);
   nla_matrix_t matrix;
   unsigned long active, i, c, trial;
@@ -175,8 +236,9 @@ static void matrix_kernel_case(unsigned long rows, unsigned long count,
   uint64_t *row_input = (uint64_t *)check_allocate(rows, sizeof(uint64_t));
   uint64_t *table = (uint64_t *)check_allocate(8U * 256U, sizeof(uint64_t));
   case_name = "original-matrix-kernels";
-  nla_matrix_init(&matrix, rows, dense, count, cols, post, 0);
-  CHECK(matrix.packed == (active >= 1024 && count <= 32768));
+  nla_matrix_init(&matrix, rows, dense, count, cols, post, setup_threads, 0);
+  CHECK(matrix.packed == (setup_threads <= 1U && active >= NLA_PACK_MIN_ROWS &&
+                         active > post + 64U && count <= NLA_PACK_MAX_COLS));
   CHECK(matrix.active_rows == active);
   if (detailed) printf("  matrix %lu x %lu, dense=%lu post=%u packed=%d\n",
                        rows, count, dense, matrix.post_rows, matrix.packed);
@@ -215,7 +277,7 @@ static void matrix_kernel_case(unsigned long rows, unsigned long count,
     nla_matrix_mul_symmetric(&matrix, input, got, row_actual, table);
     CHECK(memcmp(want, got, (size_t)count * sizeof(uint64_t)) == 0);
 #ifdef PSIQS
-    if (!matrix.packed && count > 32768) {
+    if (!matrix.packed) {
       uint32_t threads;
       for (threads = 2; threads <= 4; threads++) {
         uint64_t small[64], inner[64] = {0}, actual_inner[64];
@@ -444,7 +506,7 @@ static void matrix_rng(void) {
 
   case_name = "splitmix64-state-continues-across-solver-attempts";
   cols = matrix_fixture(101, 165, 0);
-  nla_matrix_init(&matrix, 101, 0, 165, cols, NLA_POST_ROWS, 0);
+  nla_matrix_init(&matrix, 101, 0, 165, cols, NLA_POST_ROWS, 1U, 0);
   for (i = 0; i < sizeof(vectors) / sizeof(vectors[0]); i++) {
     state = vectors[i].seed;
     for (j = 0; j < 2; j++) {
@@ -539,7 +601,7 @@ static void matrix_index_limits(void) {
     cols[column].weight = 1; cols[column].data = tail + i;
     input[column] = UINT64_C(1) << i;
   }
-  nla_matrix_init(&matrix, rows, 0, columns, cols, 48, 0);
+  nla_matrix_init(&matrix, rows, 0, columns, cols, 48, 1U, 0);
   CHECK(matrix.active_rows == rows && !matrix.packed);
   CHECK(matrix.row_columns == NULL && matrix.post_rows == 0);
   nla_matrix_mul(&matrix, input, scratch, table);
@@ -571,7 +633,7 @@ static void matrix_index_limits(void) {
       thin[i].orig = (uint32_t)i;
       thin[i].weight = 1; thin[i].data = indices + i;
     }
-    nla_matrix_init(&matrix, maximum_rows, 0, 3UL, thin, 48, 0);
+    nla_matrix_init(&matrix, maximum_rows, 0, 3UL, thin, 48, 1U, 0);
     CHECK(matrix.input_rows == maximum_rows && matrix.active_rows == 3UL);
     CHECK(!matrix.packed && matrix.iteration_rows == maximum_rows);
     nla_matrix_mul(&matrix, values, scratch, table);
@@ -650,6 +712,9 @@ static void matrix_final_batch(void) {
 }
 
 static void suite_matrix(void) {
+#ifdef PSIQS
+  matrix_thread_policy();
+#endif
   matrix_rng();
   matrix_index_limits();
   matrix_from_relations();
@@ -658,12 +723,15 @@ static void suite_matrix(void) {
   matrix_reduction();
   matrix_degenerate();
   CHECK(siqs_use_dense_solver(1536) && !siqs_use_dense_solver(1537));
-  matrix_kernel_case(1023, 1087, 0, 48);
-  matrix_kernel_case(1024, 1088, 0, 48);
-  matrix_kernel_case(1100, 1164, 37, 0);
-  matrix_kernel_case(1100, 1164, 37, 48);
-  matrix_kernel_case(1024, 32768, 0, 48);
-  matrix_kernel_case(1024, 32769, 37, 48);
+  matrix_kernel_case(1023, 1087, 0, 48, 1U);
+  matrix_kernel_case(1024, 1088, 0, 48, 1U);
+  matrix_kernel_case(1100, 1164, 37, 0, 1U);
+  matrix_kernel_case(1100, 1164, 37, 48, 1U);
+  matrix_kernel_case(1024, 32768, 0, 48, 1U);
+  matrix_kernel_case(1024, 32769, 37, 48, 1U);
+#ifdef PSIQS
+  matrix_kernel_case(1024, 8192, 37, 48, 4U);
+#endif
   matrix_solver_case(101, 165, 0);
   matrix_solver_case(1023, 1087, 0);
   matrix_solver_case(1024, 1088, 0);
@@ -671,7 +739,7 @@ static void suite_matrix(void) {
   matrix_solver_case(1472, 1536, 0);
   matrix_solver_case(1473, 1537, 0);
   if (extended) {
-    matrix_kernel_case(7, 32769, 0, 48);
+    matrix_kernel_case(7, 32769, 0, 48, 1U);
     matrix_solver_case(129, 32769, 37);
     matrix_solver_case(2050, 2114, 0);
   }

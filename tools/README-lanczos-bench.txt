@@ -14,8 +14,11 @@ The benchmark and solver have no GMP or SIQS host-adapter dependency.
 Diagnostic verbosity is passed explicitly. Requires POSIX pthreads,
 clock_gettime(CLOCK_MONOTONIC), and getrusage.
 
-Example full-size run:
+Example full-size run using the production thread policy:
   ./bench-lanczos --max-threads 64 --repeat 3 --output lanczos-110.tsv
+
+To measure forced worker counts beyond the policy's selected limits:
+  ./bench-lanczos --force-threads --max-threads 64 --repeat 3 --output lanczos-forced.tsv
 
 Quick functional/small scaling check:
   ./bench-lanczos --rows 33000 --max-threads 8 --output lanczos-small.tsv
@@ -72,18 +75,25 @@ retries, and pool/storage teardown. It does not include matrix generation or
 the harness's independent validation. Each solve uses identical matrix data
 and the fixed SplitMix64 seed 0x83d2e5b79a4c610f. The local RNG state advances
 across solver retries. Outside the timer, the harness checks A*X=0, nonempty and
-independent dependency lanes, and bit-for-bit equality with the serial result.
-This finds dependencies, not integer factors.
+independent dependency lanes, and bit-for-bit equality with a reference using
+the same internal matrix format. Packed and unpacked solves may return
+different valid dependencies. This finds dependencies, not integer factors.
 
 The harness includes lanczos.c to observe actual thread count and execute its
 unchanged private recurrence. Its small setup/retry wrapper mirrors the public
 entry point. No production sources, algorithms, or pool policies are changed.
-The BENCHMARK build defaults NLA_MAX_THREADS to 256 so a 128/192-core machine
-can explore higher counts; production's provisional 32-thread cap is unchanged.
+By default the harness applies the production size/entry-count policy, which
+selects at most 24 workers. --force-threads bypasses that policy and selects
+unpacked format for parallel solves, including matrices below the serial
+packing cutoff. Serial solves use the architecture's normal packing cutoff:
+zero on x86 and 18432 columns otherwise, overrideable at compilation with
+-DNLA_PACK_MAX_COLS=N. Small matrices also avoid conversion overhead.
+The harness defaults NLA_MAX_THREADS to 256 so --force-threads can explore
+higher counts; the production pool's configurable hard limit remains 32.
 Override the harness cap at compilation with -DNLA_MAX_THREADS=N if desired.
-Out-of-range requests are rejected. Actual pool size is recorded; a packed
-small matrix (at most 32768 columns) or failed pool creation is clearly marked
-as serial fallback, not misleadingly labelled parallel. A summary actual count
+Out-of-range requests are rejected. Actual pool size is recorded. A request
+limited to one worker is marked serial, and a lower parallel count is marked
+capped. Failed pool creation also falls back to serial. A summary actual count
 of zero means pool size varied between repeats; consult the per-solve TSV.
 
 These are solver scaling results, not predictions of overall factoring time.
@@ -92,8 +102,9 @@ For a reliable choice, use several seeds/densities on the target hardware,
 with no competing work. Large thread counts allocate one private row buffer
 per solver worker: at the default size, roughly 1.4 MiB per worker in addition
 to shared matrix/solver storage. Oversubscribed CPUs and NUMA placement can
-strongly change results. The tool does not pin threads or select a production
-thread limit automatically.
+strongly change results. The tool does not pin threads. The reported speedup
+uses the serial median, which can use a different format; absolute wall times
+are the primary comparison for choosing the fastest solve.
 
 Exact reduced matrices
 ----------------------
@@ -102,7 +113,7 @@ Use --matrix FILE to benchmark actual reduced columns without generation:
   ./bench-lanczos --matrix /private/tmp/d80-s1.matrix --max-threads 8 --repeat 3 --output real-matrix.tsv
 
 --matrix rejects explicit --rows, --weight, --head, and --seed. Existing
---max-threads, --repeat, --output, and --verbose options remain available.
+--max-threads, --force-threads, --repeat, --output, and --verbose options remain available.
 The stored row and column counts are used exactly, including empty rows and
 column counts that differ from rows + 64. Columns retain their supplied order,
 weights, original identifiers, and repeated indices. The solver still uses

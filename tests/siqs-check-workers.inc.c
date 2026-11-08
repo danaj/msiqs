@@ -636,13 +636,16 @@ static void worker_budget_entry_guards(void) {
 /* Reuse the earlier Lanczos resource-failure cases, using the existing matrix
  * fixture generator and deterministic output checks rather than another tool. */
 static void worker_lanczos_failures(void) {
+  const unsigned long dense = 64UL;
   la_col_t *cols;
   nla_matrix_t matrix;
   uint32_t i;
   uint64_t mask, other_mask, *serial, *fallback;
   case_name = "Lanczos-pool-failure-serial-fallback";
-  worker_fault_reset(); cols = matrix_fixture(129, 32769, 37);
-  nla_matrix_init(&matrix, 129, 37, 32769, cols, 48, 0);
+  worker_fault_reset(); cols = matrix_fixture(129, 32769, dense);
+  CHECK(nla_max_threads_for_size(32769UL,
+          nla_input_entries(32769UL, dense, cols), 4U) == 4U);
+  nla_matrix_init(&matrix, 129, dense, 32769, cols, 48, 4U, 0);
   CHECK(!matrix.packed);
   for (i = 0; i < 6; i++) {
     worker_fault_reset(); seam_alloc_after = (int)i;
@@ -661,15 +664,16 @@ static void worker_lanczos_failures(void) {
   }
   worker_fault_reset();
   CHECK(nla_pool_create(&matrix, 0) == NULL && nla_pool_create(&matrix, 1) == NULL);
-  serial = la_block_lanczos(129, 37, 32769, cols,
+  serial = la_block_lanczos(129, dense, 32769, cols,
                            UINT64_C(0x83d2e5b79a4c610f), &mask, 0);
-  matrix_verify_dependencies(129, 32769, 37, cols, serial, mask);
+  matrix_verify_dependencies(129, 32769, dense, cols, serial, mask);
   seam_thread_after = 1;
-  fallback = la_block_lanczos_threaded(129, 37, 32769, cols,
+  fallback = la_block_lanczos_threaded(129, dense, 32769, cols,
                                       UINT64_C(0x83d2e5b79a4c610f),
                                       &other_mask, 0, 0, 4);
+  CHECK(seam_created == 1U && seam_joined == 1U);
   CHECK(mask == other_mask && memcmp(serial, fallback, 32769U * sizeof(uint64_t)) == 0);
-  matrix_verify_dependencies(129, 32769, 37, cols, fallback, other_mask);
+  matrix_verify_dependencies(129, 32769, dense, cols, fallback, other_mask);
   free(serial); free(fallback); nla_matrix_clear(&matrix); matrix_free(cols, 32769);
   worker_resources_clear(); worker_fault_reset();
   puts("PASS workers: retained Lanczos allocation/init/partial-create failures and fixed-seed serial fallback");
