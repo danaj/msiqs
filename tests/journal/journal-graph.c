@@ -27,11 +27,11 @@ int main(int argc, char **argv) {
     hash=siqs_mix64(hash ^ mpz_fdiv_ui(r->y,4294967279UL));
     hash=siqs_mix64(hash ^ r->nfactors);
     for (k=0;k<r->nfactors;k++)
-      hash=siqs_mix64(hash ^ ((uint64_t)r->factors[k].row<<32) ^ r->factors[k].exponent);
+      hash=siqs_mix64(hash ^ ((uint64_t)(ctx.lp_combiner != NULL ? siqs_lp_archive_row(r,k) : r->factors[k].row)<<32) ^ (ctx.lp_combiner != NULL ? siqs_lp_archive_exponent(r,k) : r->factors[k].exponent));
   }
   printf("{\"raw\":%u,\"full\":%u,\"smooth\":%llu,\"one_lp\":%llu,\"two_lp\":%llu,"
       "\"split_squfof\":%llu,\"split_ecm\":%llu,\"digest\":\"%016llx\"}\n",
-      ctx.raw_count,ctx.full_count,(unsigned long long)ctx.accepted_smooth,
+      siqs_partial_count(&ctx),siqs_relation_count(&ctx),(unsigned long long)ctx.accepted_smooth,
       (unsigned long long)ctx.accepted_one_lp,(unsigned long long)ctx.accepted_two_lp,
       (unsigned long long)ctx.split_squfof,(unsigned long long)ctx.split_ecm,
       (unsigned long long)hash);

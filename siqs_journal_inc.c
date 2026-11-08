@@ -474,8 +474,8 @@ static void sj_flush(siqs_ctx_t *ctx) {
 #undef SJ_PUT_COUNTER
   sj_u64(&b, ctx->la_rng.state); sj_u64(&b, ctx->cofactor_rng.state);
   sj_u64(&b, ctx->poly_rng.state);
-  sj_u64(&b, ctx->full_count);
-  sj_u64(&b, (uint64_t)ctx->raw_count + ctx->one_lp.count);
+  sj_u64(&b, siqs_relation_count(ctx));
+  sj_u64(&b, (uint64_t)siqs_partial_count(ctx));
   sj_u64(&b, ctx->matrix_next_target);
   {
     unsigned i;
@@ -661,9 +661,31 @@ static void sj_replay_batch(siqs_ctx_t *ctx, siqs_poly_t *poly, uint64_t *famili
     } else sj_error(j, "unknown relation-batch event");
   }
   mpz_clear(y); sj_done(&r);
-  if (full != ctx->full_count || partials != (uint64_t)ctx->raw_count + ctx->one_lp.count ||
-      target > UINT32_MAX || memcmp(cycles, ctx->journal_cycles, sizeof(cycles)) != 0)
+  if (partials != (uint64_t)siqs_partial_count(ctx) ||
+      target > UINT32_MAX ||
+      (ctx->lp_combiner == NULL && memcmp(cycles, ctx->journal_cycles, sizeof(cycles)) != 0))
     sj_error(j, "graph statistics do not match replayed relations");
+  if (full != siqs_relation_count(ctx)) {
+    /* The old collector discards a cycle when an LP inverse fails. The LP
+     * kernel retains it and can discover the same proper divisor earlier.
+     * Permit that difference only after verifying an actual split. */
+    if (ctx->lp_combiner == NULL || !ctx->factor_found ||
+        ctx->result->count < 2U || full > siqs_relation_count(ctx))
+      sj_error(j, "graph statistics do not match replayed relations");
+    siqs_verify_partition(ctx->original_n, ctx->result);
+  }
+  if (ctx->lp_combiner != NULL) {
+    /* Old graph and LP elimination choose different valid kernel bases.
+     * Keep the producer's diagnostic histogram when replaying either, but
+     * still check the producer's bins against its completed count. */
+    uint64_t total = 0;
+    for (k = 0; k < 8; ++k) {
+      if (cycles[k] > UINT64_MAX - total) sj_error(j, "cycle counter overflow");
+      total += cycles[k];
+    }
+    if (total != full) sj_error(j, "cycle histogram does not match relation count");
+    memcpy(ctx->journal_cycles, cycles, sizeof(cycles));
+  }
   ctx->matrix_next_target = (uint32_t)target;
   if (j->families != expected_families) sj_error(j, "family progress does not match events");
   *families = j->families; *polynomials = polys; k = 0;

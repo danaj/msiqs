@@ -94,6 +94,15 @@ assert json.loads((RESULTS/'seed-info.log').read_text())['contexts'][0]['initial
 step('build-attempts',['cc','-O1','-o',str(RESULTS/'journal-attempts'),
                        str(FIXTURES/'journal-attempts.c'),str(BUILD/'lanczos.c'),
                        str(BUILD/'pr32_iter.c'),str(ROOT/'tinyecm64.c'),'-lgmp','-lm'])
+step('build-lp-divisor',['cc','-O1','-o',str(RESULTS/'journal-lp-divisor'),
+                         str(FIXTURES/'journal-lp-divisor.c'),str(BUILD/'lanczos.c'),
+                         str(BUILD/'pr32_iter.c'),str(ROOT/'tinyecm64.c'),'-lgmp','-lm'])
+path=RESULTS/'lp-divisor.journal'
+if path.exists():path.unlink()
+step('lp-divisor-record',[str(RESULTS/'journal-lp-divisor'),str(path)])
+data=path.read_bytes()
+step('lp-divisor-replay',[str(RESULTS/'journal-lp-divisor'),str(path)])
+assert path.read_bytes()==data
 step('event-headers',[sys.executable,'-u',str(FIXTURES/'test-event-headers.py'),str(RESULTS/'journal-attempts')])
 step('solve-flush',[sys.executable,'-u',str(FIXTURES/'test-solve-flush.py'),str(RESULTS/'journal-attempts')])
 step('run-clock',[sys.executable,'-u',str(FIXTURES/'test-journal-timing.py'),str(RESULTS/'journal-attempts')])

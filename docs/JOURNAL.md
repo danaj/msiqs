@@ -255,13 +255,21 @@ zero before ECM was introduced. The version-1 layout remains unchanged.
 The snapshot describes graph state after every relation in this batch has
 been processed.  Size/event-triggered flushes therefore occur after processing
 the triggering relation; completed-family flushing is unchanged.  Retained
-partials count raw graph records plus dedicated 1LP anchors, including records
-that may already participate in completed relations.  Length bins count raw
-relations combined per completed relation: smooth records contribute length
-1, dedicated 1LP pairs length 2, and graph cycles their edge count.  The bins
-sum to completed_full_relations.  Counters are maintained at completion,
-without scanning the graph.  Replay checks these observations against its
-reconstructed graph and restores the polynomial RNG state.
+partials describe the rank of the LP parity map. The older graph collector
+stores this as raw graph records plus dedicated 1LP anchors; the general LP
+collector keeps every accepted original and a sparse LP basis. Completed
+relations count independent LP-free combinations, rather than retained originals.
+
+The eight length bins are diagnostic and sum to completed_full_relations.
+For the older collector they count raw relations per completed relation:
+smooth records have length 1, dedicated 1LP pairs length 2, and graph cycles
+their edge count. The general collector bins a conservative bound on the
+number of original occurrences in its provenance DAG. Different valid kernel
+bases can produce different bins. Replay verifies logical full/partial counts,
+checks the bin total, and preserves the producer's histogram. An older failed
+LP inversion can discard a cycle while finding a factor; that completed-count
+difference is allowed only after verifying the reconstructed proper split.
+Replay also restores the polynomial RNG state.
 
 The rest is an ordered stream of events.  The frame's item count is the
 number of events, not just the number of relations.  Each event starts with

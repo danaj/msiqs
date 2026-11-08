@@ -84,7 +84,7 @@ static int check_events(const char *path, int solve) {
     if (solve) {
       uint64_t sequence = journal->sequence;
       uint32_t k;
-      for (k = 1; ctx.full_count < SIQS_MATRIX_EXTRA_RELS(&ctx); k++) {
+      for (k = 1; siqs_relation_count(&ctx) < SIQS_MATRIX_EXTRA_RELS(&ctx); k++) {
         factor.exponent = 2U*k;
         mpz_set_ui(y, 1); mpz_mul_2exp(y, y, k);
         siqs_accept_raw_relation(&ctx, siqs_raw_relation_new(&ctx, y, &factor, 1, 1, 1));
@@ -96,7 +96,7 @@ static int check_events(const char *path, int solve) {
     } else sj_flush(&ctx);
   }
   printf("{\"full\":%u,\"smooth\":%llu,\"one_lp\":%llu,\"two_lp\":%llu,\"families\":%llu}\n",
-    ctx.full_count, (unsigned long long)ctx.accepted_smooth,
+    siqs_relation_count(&ctx), (unsigned long long)ctx.accepted_smooth,
     (unsigned long long)ctx.accepted_one_lp, (unsigned long long)ctx.accepted_two_lp,
     (unsigned long long)journal->families);
   siqs_poly_clear(&ctx, &poly); siqs_ctx_clear(&ctx);

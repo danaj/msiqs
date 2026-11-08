@@ -301,12 +301,12 @@ static uint64_t autotune_work_rate(const mpz_t n, double seconds) {
     for (;;) {
       siqs_sieve_polynomial(&ctx, &poly);
       polys++;
-      if (ctx.factor_found || ctx.full_count >= ctx.params.target_relations)
+      if (ctx.factor_found || siqs_relation_count(&ctx) >= ctx.params.target_relations)
         done = 1;
-      if (!done && ctx.full_count >= next_check) {
+      if (!done && siqs_relation_count(&ctx) >= next_check) {
         uint32_t rows, cols;
         done = siqs_matrix_ready(&ctx, &rows, &cols);
-        next_check = ctx.full_count + check_interval;
+        next_check = siqs_relation_count(&ctx) + check_interval;
       }
       if (!done && (polys & 31U) == 0 && bench_wall() - wall_start >= seconds)
         done = 1;

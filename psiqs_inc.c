@@ -393,7 +393,7 @@ static int psiqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *dispatch,
     check_interval = SIQS_MATRIX_CHECK_MIN;
   if (check_interval > SIQS_MATRIX_CHECK_MAX)
     check_interval = SIQS_MATRIX_CHECK_MAX;
-  if (ctx->factor_found || (ctx->use_bids ? ctx->bids_stop : ctx->full_count >= target))
+  if (ctx->factor_found || (ctx->use_bids ? ctx->bids_stop : siqs_relation_count(ctx) >= target))
     return 1;
   if (*poly_count >= max_polynomials)
     return 0;
@@ -431,10 +431,10 @@ static int psiqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *dispatch,
     (*family_count)++;
     *poly_count += worker->polynomials;
     psiqs_merge_worker(ctx, worker);
-    if (!ctx->use_bids && ctx->full_count >= *next_matrix_check && !ctx->factor_found) {
+    if (!ctx->use_bids && siqs_relation_count(ctx) >= *next_matrix_check && !ctx->factor_found) {
       uint32_t rows, columns;
       ready = siqs_matrix_ready(ctx, &rows, &columns);
-      *next_matrix_check = ctx->full_count + check_interval;
+      *next_matrix_check = siqs_relation_count(ctx) + check_interval;
       if (!ready && verbose > 2) {
         printf("# siqs matrix core %u columns, %u rows%s\n",
                columns, rows, ready ? ", ready" : "");
@@ -448,11 +448,11 @@ static int psiqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *dispatch,
     if (verbose > 1 && *poly_count >= next_report) {
       siqs_print_polynomial_notice(ctx, *poly_count);
       siqs_print_relation_report(ctx, target, *poly_count);
-      last_report_count = ctx->full_count;
+      last_report_count = siqs_relation_count(ctx);
       last_report_polys = *poly_count;
       next_report = *poly_count + report_step;
     }
-    if (ctx->factor_found || (ctx->use_bids ? ctx->bids_stop : ctx->full_count >= target)) {
+    if (ctx->factor_found || (ctx->use_bids ? ctx->bids_stop : siqs_relation_count(ctx) >= target)) {
       complete = 1;
       break;
     }
@@ -481,19 +481,19 @@ static int psiqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *dispatch,
   }
   if (verbose > 0)
     siqs_print_polynomial_notice(ctx, *poly_count);
-  if (ctx->factor_found || (ctx->use_bids ? ctx->bids_stop : ctx->full_count >= target))
+  if (ctx->factor_found || (ctx->use_bids ? ctx->bids_stop : siqs_relation_count(ctx) >= target))
     complete = 1;
   if (ready && verbose > 1) {
     uint32_t rows, columns;
     (void)siqs_matrix_ready(ctx, &rows, &columns);
     siqs_print_relation_report(ctx, target, *poly_count);
-    last_report_count = ctx->full_count;
+    last_report_count = siqs_relation_count(ctx);
     last_report_polys = *poly_count;
     printf("# siqs matrix core %u columns, %u rows, ready\n", columns, rows);
     fflush(stdout);
   }
   if (verbose > 1 &&
-      (last_report_count != ctx->full_count || last_report_polys != *poly_count))
+      (last_report_count != siqs_relation_count(ctx) || last_report_polys != *poly_count))
     siqs_print_relation_report(ctx, target, *poly_count);
   psiqs_pool_destroy(pool);
   return complete;

@@ -222,6 +222,28 @@ solver for quadratic sieve described in
 [*Compact incremental Gaussian elimination over Z/2Z*](https://infoscience.epfl.ch/bitstreams/6551ea6d-64fa-463a-8dd9-6542168ba782/download), Lenstra and Manasse (1988).
 We developed BIDS independently, before finding this paper.
 
+## Combining partial relations
+
+For ordinary 2LP collection, a sparse GF(2) basis eliminates only the
+large-prime parities. Each dependent insertion produces an independent
+LP-free combination. An immutable XOR history records which accepted
+relations contribute, so combinations need no intermediate GMP products
+or inversions. The final Lanczos matrix still contains only factor-base
+rows. During dependency recovery the history is expanded back to the
+original roots and complete exponents.
+
+Accepted originals share a collector-owned arena. Row/exponent pairs use
+four bytes when they fit 27 row bits and five exponent bits; a record uses
+the ordinary wider pairs if either field needs more room. GMP owns the
+root limbs as before. The dedicated 1LP collector and BIDS keep their
+existing paths. This backend does not enable a 3LP policy or splitter.
+
+The 2LP readiness gate uses the complete factor-base row count and the
+usual surplus. It can collect slightly more than the older graph's
+repeated singleton-peeling checks. Logical completed/partial counts are
+separate from the number of retained originals; journal snapshots use the
+logical counts described in [JOURNAL.md](JOURNAL.md).
+
 ## How LP and R are selected
 
 Policy bands use bits(N), where N is the input remaining after
