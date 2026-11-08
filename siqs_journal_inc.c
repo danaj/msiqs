@@ -42,7 +42,7 @@ struct siqs_journal_t {
 #endif
   unsigned char *frame;
   uint32_t frame_type, frame_size, frame_count;
-  int reading, have_frame, replaying, need_position;
+  int reading, read_only, have_frame, replaying, need_position;
   sj_buffer batch;
   uint32_t events;
   unsigned lp_bytes;
@@ -95,9 +95,11 @@ static void sj_lock(siqs_journal_t *j) {
 #else
   struct flock lock;
   memset(&lock, 0, sizeof(lock));
-  lock.l_type = F_WRLCK; lock.l_whence = SEEK_SET;
+  lock.l_type = j->read_only ? F_RDLCK : F_WRLCK;
+  lock.l_whence = SEEK_SET;
   if (fcntl(fileno(j->file), F_SETLK, &lock) != 0)
-    sj_error(j, "cannot obtain exclusive journal lock");
+    sj_error(j, j->read_only ? "cannot obtain shared journal lock"
+                             : "cannot obtain exclusive journal lock");
 #endif
 }
 static uint64_t sj_tell(siqs_journal_t *j) {
@@ -282,6 +284,7 @@ static void sj_write(siqs_journal_t *j, uint32_t type, uint32_t count, const sj_
   sj_buffer header = {NULL, 0, 0}; uint32_t crc;
   uint64_t now, utc, elapsed;
   if (j->reading || j->have_frame) sj_error(j, "attempted append before replay completed");
+  if (j->read_only) sj_error(j, "journal is read-only; appending is required");
   if (j->sequence == UINT64_MAX) sj_error(j, "frame sequence exhausted");
   sj_position(j);
   now = sj_clock_us(j, 1);
@@ -377,6 +380,18 @@ siqs_journal_t *gmp_siqs_journal_open(const char *path, mpz_srcptr n) {
 #else
   j->file = fopen(path, "r+b");
 #endif
+  if (j->file == NULL && (errno == EACCES || errno == EPERM
+#ifdef EROFS
+                         || errno == EROFS
+#endif
+                         )) {
+#ifdef _WIN32
+    j->file = _fsopen(path, "rb", _SH_DENYWR);
+#else
+    j->file = fopen(path, "rb");
+#endif
+    if (j->file != NULL) j->read_only = 1;
+  }
   if (j->file != NULL) {
     mpz_t stored; sj_reader r;
     sj_lock(j);

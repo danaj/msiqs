@@ -173,6 +173,85 @@ def main():
             journals[name] = (n, data, parsed)
             check(name+' complete replay, cross-thread count, byte-identical journal')
 
+        # Some privileged users can still write mode-0444 files. Exercise the
+        # permission fallback only where the filesystem actually enforces it.
+        path = tmp/'read-only-probe.journal'
+        path.write_bytes(journals['smooth'][1]); path.chmod(0o444)
+        try:
+            with path.open('r+b'):
+                writable = True
+        except PermissionError:
+            writable = False
+        finally:
+            path.chmod(0o644)
+        if writable:
+            print('SKIP read-only permission checks: process can write mode-0444 files', flush=True)
+        else:
+            for name, (number, stored, _) in journals.items():
+                path = tmp/('read-only-'+name+'.journal')
+                path.write_bytes(stored); path.chmod(0o444)
+                try:
+                    run(number, path)
+                    run(number, path, 4, inferred=True)
+                    if name == 'smooth' and args.serial_executable:
+                        run(number, path, exe=args.serial_executable.resolve(), inferred=True)
+                    assert path.read_bytes() == stored
+                    assert path.stat().st_mode & 0o777 == 0o444
+                finally:
+                    path.chmod(0o644)
+                check(name+' read-only complete replay leaves bytes and permissions unchanged')
+
+            number, stored, stored_frames = journals['smooth']
+            job_end = next(f[0] for f in stored_frames if f[2] == 6)
+            for label, prefix in [('missing-job-end', stored[:job_end]),
+                                  ('partial-job-end', stored[:-7]),
+                                  ('input-only', stored[:stored_frames[0][1]])]:
+                path = tmp/('read-only-'+label+'.journal')
+                path.write_bytes(prefix); path.chmod(0o444)
+                try:
+                    p = run(number, path, ok=False, inferred=True)
+                    assert 'journal is read-only; appending is required' in p.stdout+p.stderr
+                    assert not any(line.startswith(f'{number}:') for line in p.stdout.splitlines())
+                    assert path.read_bytes() == prefix
+                finally:
+                    path.chmod(0o644)
+                check('read-only '+label+' rejects append without changing the file')
+
+            path = tmp/'read-only-invalid.journal'
+            changed = bytearray(stored); changed[-1] ^= 1
+            path.write_bytes(changed); path.chmod(0o444)
+            try:
+                p = run(number, path, ok=False)
+                assert 'checksum mismatch' in p.stdout+p.stderr
+                assert path.read_bytes() == changed
+            finally:
+                path.chmod(0o644)
+            check('read-only replay still rejects complete corrupt frames')
+
+            path = tmp/'read-only-lock.journal'; path.write_bytes(stored)
+            with path.open('rb') as locked:
+                fcntl.lockf(locked, fcntl.LOCK_SH|fcntl.LOCK_NB)
+                path.chmod(0o444)
+                try:
+                    run(number, path, inferred=True)
+                    path.chmod(0o644)
+                    p = run(number, path, ok=False)
+                    assert 'exclusive journal lock' in p.stdout+p.stderr
+                    assert path.read_bytes() == stored
+                finally:
+                    path.chmod(0o644)
+            check('read-only sessions share a lock and exclude writable sessions')
+            with path.open('r+b') as locked:
+                fcntl.lockf(locked, fcntl.LOCK_EX|fcntl.LOCK_NB)
+                path.chmod(0o444)
+                try:
+                    p = run(number, path, ok=False)
+                    assert 'shared journal lock' in p.stdout+p.stderr
+                    assert path.read_bytes() == stored
+                finally:
+                    path.chmod(0o644)
+            check('writable session excludes read-only replay')
+
         source = tmp/'two-lp.journal'
         old = source.read_bytes()
         p = run(TWO+2, source, ok=False)

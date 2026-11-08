@@ -41,10 +41,16 @@ the ordinary command-line/multiple-input/stdin behavior is unchanged.
 An input mismatch is a fatal error, including when the new input would be
 handled entirely by trial division, primality testing, or perfect-power handling.
 
+Existing journals fall back to read-only access when write access is denied
+or the filesystem is read-only. Completed journals can then be replayed.
+Any required append, including a missing final JOB_END record, fails with a
+read-only error before modifying the file or truncating an incomplete tail.
+
 The coordinator owns the file and its buffer. Workers neither read nor write
 it.  Serial and parallel collection use the same format, and the requested
-worker count may change on restart.  An exclusive, nonblocking process lock
-rejects another process using the same file.  The caller must also keep one
+worker count may change on restart. On POSIX, writable sessions take an
+exclusive, nonblocking process lock; read-only sessions take a shared lock.
+Both exclude concurrent writers. The caller must also keep one
 coordinator per session and one session per file within a process; process
 locks do not serialize callers within a single process.
 
@@ -452,8 +458,9 @@ relations come from combined partials.  Smooth-only operation skips the partials
 condition.  Rough estimates use whole seconds or minutes; JSON retains the
 unrounded forecast.  These are display cues and do not change the ETA model.
 
-A read-only inspector takes no writer lock.  POSIX writer ownership uses an
-advisory fcntl lock.  Windows streams use `_SH_DENYWR`, excluding another writer
+A read-only inspector takes no writer lock. POSIX factorer sessions use an
+advisory fcntl write lock for writable journals and a read lock for read-only
+journals. Windows factorer streams use `_SH_DENYWR`, excluding another writer
 while allowing readers; locking the journal's data bytes would also block
 readers on Windows.  See Microsoft's
 [\_fsopen sharing modes](https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/fsopen-wfsopen)
