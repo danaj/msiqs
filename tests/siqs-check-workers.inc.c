@@ -145,6 +145,8 @@ static void worker_reuse(void) {
           CHECK(w->ctx.fb_in_a != other->fb_in_a &&
                 w->ctx.root1 != other->root1 && w->ctx.root2 != other->root2);
         }
+        /* This lifecycle test intentionally requests distinct A values. */
+        w->family_assigned = 0;
         CHECK(psiqs_pool_assign(pool, &f.ctx, &f.dispatch, w, 1U + round % 3U));
         CHECK(used < 32);
         mpz_set(assigned[used], w->poly.A);
@@ -783,6 +785,55 @@ static void worker_simultaneous_calls(void) {
   puts("PASS workers: two simultaneous callers own independent pools after one host startup");
 }
 
+static void worker_publication_resumption(void) {
+  worker_fixture_t f;
+  worker_schedule_t *s = &worker_schedule;
+  psiqs_pool_t *pool;
+  psiqs_worker_t *w;
+  mpz_t first_a;
+  uint32_t limit;
+  case_name = "shorten-running-publication-at-stop-checkpoint";
+  worker_fault_reset(); worker_fixture_open(&f, 1, 0);
+  memset(s, 0, sizeof(*s));
+  CHECK(pthread_mutex_init(&s->mutex, NULL) == 0);
+  CHECK(pthread_cond_init(&s->changed, NULL) == 0);
+  seam_controlled_start = psiqs_pool_worker;
+  seam_unlock_before = worker_early_stop_before_unlock;
+  seam_unlock_after = worker_schedule_after_unlock;
+  pool = psiqs_pool_create(&f.ctx); CHECK(pool != NULL);
+  CHECK(pool->publication_polynomials == 0);
+  limit = f.dispatch.b_limit; CHECK(limit > 64);
+  CHECK(psiqs_pool_assign(pool, &f.ctx, &f.dispatch, pool->workers, limit));
+  pthread_mutex_lock(&s->mutex);
+  while (!s->running[0]) pthread_cond_wait(&s->changed, &s->mutex);
+  pthread_mutex_unlock(&s->mutex);
+  /* The worker has cached the old interval at polynomial 32 and released
+   * the pool mutex. The new request must be seen at polynomial 64. */
+  psiqs_pool_set_publication_interval(pool, 32);
+  pthread_mutex_lock(&s->mutex); s->release_work = 1;
+  pthread_cond_broadcast(&s->changed); pthread_mutex_unlock(&s->mutex);
+  w = psiqs_pool_take(pool);
+  CHECK(w->polynomials == 64 && w->family_polynomials == 64 && w->limit == limit);
+  CHECK(w->poly.b_index == 63);
+  mpz_init_set(first_a, w->poly.A);
+  worker_verify_raw(&w->ctx); psiqs_merge_worker(&f.ctx, w);
+  seam_unlock_before = NULL; seam_unlock_after = NULL;
+  /* Resetting zero restores whole-family delivery, without choosing a new A. */
+  psiqs_pool_set_publication_interval(pool, 0);
+  CHECK(psiqs_pool_assign(pool, &f.ctx, &f.dispatch, w, limit));
+  w = psiqs_pool_take(pool);
+  CHECK(w->polynomials == limit - 64 && w->family_polynomials == limit);
+  CHECK(w->poly.b_index == limit - 1U);
+  CHECK(mpz_cmp(first_a, w->poly.A) == 0);
+  worker_verify_raw(&w->ctx); psiqs_merge_worker(&f.ctx, w);
+  psiqs_pool_destroy(pool); worker_resources_clear();
+  seam_controlled_start = NULL;
+  CHECK(pthread_cond_destroy(&s->changed) == 0);
+  CHECK(pthread_mutex_destroy(&s->mutex) == 0);
+  worker_fixture_close(&f); mpz_clear(first_a);
+  puts("PASS dynamic publication: whole-family default, shorten running job at next poll, refund unused budget, resume same A, restore zero");
+}
+
 static void suite_workers(void) {
   worker_fault_reset();
   CHECK(pthread_key_create(&seam_key, NULL) == 0); seam_key_ready = 1;
@@ -791,6 +842,7 @@ static void suite_workers(void) {
 #endif
 
   worker_reuse(); worker_shutdown(); worker_early_shutdown();
+  worker_publication_resumption();
   worker_merge_ownership(); worker_creation_failures();
   worker_budget_and_fallback(); worker_budget_entry_guards();
   worker_lanczos_failures(); worker_public_calls();

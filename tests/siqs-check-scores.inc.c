@@ -551,6 +551,7 @@ static void check_score_worker_inheritance(void) {
     fixture.ctx.params.sieve_raw_scores = mode != 0;
     fixture.ctx.params.sieve_saturating = mode == 2;
     psiqs_worker_init(&worker, &fixture.ctx, 0);
+    CHECK(worker.pool == NULL); /* Exercise pool-free polynomial preparation. */
     CHECK(worker.ctx.params.sieve_raw_scores == fixture.ctx.params.sieve_raw_scores);
     CHECK(worker.ctx.params.sieve_saturating == fixture.ctx.params.sieve_saturating);
     CHECK(psiqs_assign_family(&fixture.ctx, &fixture.dispatch, &worker, 1));

@@ -16,6 +16,12 @@
 
 typedef struct psiqs_pool_t psiqs_pool_t;
 
+/* Bound delivery latency without discarding the rest of an A family.
+ * Zero preserves whole-family publication. */
+#ifndef PSIQS_PUBLICATION_POLYNOMIALS
+# define PSIQS_PUBLICATION_POLYNOMIALS 0U
+#endif
+
 typedef enum { PSIQS_IDLE, PSIQS_WORK, PSIQS_READY } psiqs_worker_state_t;
 
 typedef struct {
@@ -24,6 +30,8 @@ typedef struct {
   siqs_factor_array_t result;
   uint32_t limit;
   uint32_t polynomials;
+  uint32_t family_polynomials;
+  int family_assigned;
   psiqs_pool_t *pool;
   pthread_t thread;
   pthread_cond_t work;
@@ -38,10 +46,20 @@ struct psiqs_pool_t {
   uint32_t *ready;
   uint32_t count, initialized, conditions, live;
   uint32_t head, tail, queued;
+  uint32_t publication_polynomials; /* Coordinator-owned; workers read under mutex. */
   pthread_mutex_t mutex;
   pthread_cond_t done;
   int stop;
 };
+
+/* The coordinator can request earlier delivery without abandoning A.
+ * Running workers observe changes at the existing 32-polynomial stop poll. */
+static void psiqs_pool_set_publication_interval(psiqs_pool_t *pool,
+                                                uint32_t polynomials) {
+  pthread_mutex_lock(&pool->mutex);
+  pool->publication_polynomials = polynomials;
+  pthread_mutex_unlock(&pool->mutex);
+}
 
 /* Workers own every writable field and borrow the collector's immutable FB
  * tables.  Reuse scratch cleanup without allocating cycle/dependency scratch
@@ -77,6 +95,17 @@ static void psiqs_worker_init(psiqs_worker_t *worker,
 }
 
 /* Select distinct A values serially, then let each worker initialize roots. */
+static void psiqs_prepare_publication(psiqs_worker_t *worker, uint32_t limit) {
+  uint32_t remaining = worker->poly.b_limit - worker->family_polynomials;
+  /* Standalone polynomial preparation, including benchmarks, has no pool. */
+  uint32_t publication = worker->pool != NULL
+                       ? worker->pool->publication_polynomials : 0;
+  if (limit > remaining) limit = remaining;
+  if (publication != 0 && limit > publication) limit = publication;
+  worker->limit = limit;
+  worker->polynomials = 0;
+}
+
 static int psiqs_assign_family(siqs_ctx_t *master, siqs_poly_t *dispatch,
                                psiqs_worker_t *worker, uint32_t limit) {
   siqs_ctx_t *ctx = &worker->ctx;
@@ -95,8 +124,9 @@ static int psiqs_assign_family(siqs_ctx_t *master, siqs_poly_t *dispatch,
     ctx->fb_in_a[poly->a_index[i]] = 1;
   mpz_set(poly->A, dispatch->A);
   mpz_set(poly->DA, dispatch->DA);
-  worker->limit = limit;
-  worker->polynomials = 0;
+  worker->family_polynomials = 0;
+  worker->family_assigned = 1;
+  psiqs_prepare_publication(worker, limit);
   return 1;
 }
 
@@ -107,11 +137,19 @@ static void *psiqs_sieve_family(void *argument) {
   psiqs_worker_t *worker = (psiqs_worker_t *)argument;
   siqs_ctx_t *ctx = &worker->ctx;
   siqs_poly_t *poly = &worker->poly;
-  siqs_first_B_and_roots(ctx, poly);
-  siqs_set_family_sieve_initial(ctx);
+  if (worker->family_polynomials == 0) {
+    siqs_first_B_and_roots(ctx, poly);
+    siqs_set_family_sieve_initial(ctx);
+  } else {
+    /* Publication leaves roots and Gray-code state at the last polynomial.
+     * Advance once before continuing the same family. */
+    if (!siqs_next_B(ctx, poly))
+      croak("PSIQS: attempted to continue an exhausted family");
+  }
   do {
     siqs_sieve_polynomial(ctx, poly);
     worker->polynomials++;
+    worker->family_polynomials++;
     if (ctx->factor_found || worker->polynomials >= worker->limit)
       break;
     /* A q=12 family has 2048 polynomials.  At readiness, finish only
@@ -121,7 +159,9 @@ static void *psiqs_sieve_family(void *argument) {
     if ((worker->polynomials & 31U) == 0) {
       int stop;
       pthread_mutex_lock(&worker->pool->mutex);
-      stop = worker->pool->stop;
+      stop = worker->pool->stop ||
+             (worker->pool->publication_polynomials != 0 &&
+              worker->polynomials >= worker->pool->publication_polynomials);
       pthread_mutex_unlock(&worker->pool->mutex);
       if (stop)
         break;
@@ -302,6 +342,7 @@ static psiqs_pool_t *psiqs_pool_create(siqs_ctx_t *ctx) {
     goto fail_mutex;
   if (pthread_mutex_init(&pool->mutex, NULL) != 0)
     goto fail_mutex;
+  psiqs_pool_set_publication_interval(pool, PSIQS_PUBLICATION_POLYNOMIALS);
   if (pthread_cond_init(&pool->done, NULL) != 0)
     goto fail_done;
   for (i = 0; i < pool->count; i++) {
@@ -349,8 +390,13 @@ fail_mutex:
 static int psiqs_pool_assign(psiqs_pool_t *pool, siqs_ctx_t *ctx,
                               siqs_poly_t *dispatch, psiqs_worker_t *worker,
                               uint32_t limit) {
-  if (!psiqs_assign_family(ctx, dispatch, worker, limit))
-    return 0;
+  if (!worker->family_assigned ||
+      worker->family_polynomials == worker->poly.b_limit) {
+    if (!psiqs_assign_family(ctx, dispatch, worker, limit))
+      return 0;
+  } else {
+    psiqs_prepare_publication(worker, limit);
+  }
   pthread_mutex_lock(&pool->mutex);
   worker->state = PSIQS_WORK;
   pthread_cond_signal(&worker->work);
@@ -420,7 +466,7 @@ static int psiqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *dispatch,
         exhausted = 1;
         break;
       }
-      remaining -= limit;
+      remaining -= pool->workers[i].limit;
       active++;
     }
   }
@@ -428,7 +474,9 @@ static int psiqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *dispatch,
     psiqs_worker_t *worker = psiqs_pool_take(pool);
     active--;
     remaining += worker->limit - worker->polynomials;
-    (*family_count)++;
+    if (worker->polynomials != 0 &&
+        worker->family_polynomials == worker->polynomials)
+      (*family_count)++;
     *poly_count += worker->polynomials;
     psiqs_merge_worker(ctx, worker);
     if (!ctx->use_bids && siqs_relation_count(ctx) >= *next_matrix_check && !ctx->factor_found) {
@@ -456,11 +504,12 @@ static int psiqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *dispatch,
       complete = 1;
       break;
     }
-    if (!exhausted && remaining != 0) {
+    if (remaining != 0 && (!exhausted ||
+        worker->family_polynomials < worker->poly.b_limit)) {
       uint32_t limit = dispatch->b_limit < remaining
                      ? dispatch->b_limit : (uint32_t)remaining;
       if (psiqs_pool_assign(pool, ctx, dispatch, worker, limit)) {
-        remaining -= limit;
+        remaining -= worker->limit;
         active++;
       } else {
         exhausted = 1;
@@ -474,7 +523,9 @@ static int psiqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *dispatch,
   for (i = 0; i < pool->count; i++) {
     psiqs_worker_t *worker = pool->workers + i;
     if (worker->state == PSIQS_READY) {
-      (*family_count)++;
+      if (worker->polynomials != 0 &&
+          worker->family_polynomials == worker->polynomials)
+        (*family_count)++;
       *poly_count += worker->polynomials;
       psiqs_merge_worker(ctx, worker);
     }
