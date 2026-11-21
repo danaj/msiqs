@@ -4,6 +4,7 @@
 /bench-sieve
 /check-autotune
 /check-pr32
+/check-3lp
 *.o
 __pycache__/
 .DS_Store

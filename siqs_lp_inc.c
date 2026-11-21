@@ -195,6 +195,21 @@ static void siqs_lp_combiner_insert(siqs_lp_combiner_t *s, uint32_t first_lp,
       ++s->swaps;
     }
     s->xor_entries += (uint64_t)weight + pivot->weight;
+    /* After any swap, the pivot is no heavier than the work vector.
+     * A singleton pivot removes the last entry. Two pairs also fit in place. */
+    if (pivot->weight == 1U || weight == 2U) {
+      if (pivot->weight == 1U) used = weight - 1U;
+      else if (data[0] == pivot->data[0]) used = 0;
+      else {
+        uint32_t other = pivot->data[0];
+        if (data[0] < other) data[1] = other;
+        else { data[1] = data[0]; data[0] = other; }
+        used = 2;
+      }
+      node = siqs_lp_combiner_node(s, node, pivot->node);
+      weight = used;
+      continue;
+    }
     merged = siqs_malloc(siqs_array_size(siqs_size_add(weight, pivot->weight), sizeof(*merged)));
     while (a < weight && b < pivot->weight) {
       if (data[a] < pivot->data[b]) merged[used++] = data[a++];
@@ -224,10 +239,6 @@ static void siqs_lp_combiner_add_index(siqs_ctx_t *ctx, uint32_t original) {
 
 static void siqs_lp_combiner_add(siqs_ctx_t *ctx) {
   siqs_lp_combiner_add_index(ctx, ctx->full_count - 1U);
-}
-
-static uint32_t siqs_relation_count(const siqs_ctx_t *ctx) {
-  return ctx->lp_combiner != NULL ? ctx->lp_combiner->cycle_count : ctx->full_count;
 }
 
 /* Expand 64 kernel/dependency vectors together. Cycle IDs remain meaningful
@@ -373,13 +384,6 @@ static la_col_t *siqs_lp_combiner_matrix(siqs_ctx_t *ctx,
   return columns;
 }
 
-/* The collector retains originals, but scheduling and journal statistics
- * count emitted LP-free combinations and independent LP pivots. */
-static uint32_t siqs_partial_count(const siqs_ctx_t *ctx) {
-  return ctx->lp_combiner != NULL ? ctx->lp_combiner->rank
-                                : ctx->raw_count + ctx->one_lp.count;
-}
-
 static uint32_t siqs_matrix_rows(const siqs_ctx_t *ctx) {
   uint32_t extra = ctx->lp_combiner != NULL ? ctx->lp_combiner->label_count : 0;
   if (extra > UINT32_MAX - 1U - ctx->params.fb_size)
@@ -410,7 +414,7 @@ static void siqs_lp_prepare_dependency(siqs_ctx_t *ctx) {
  * LP combination history for square-root reconstruction. */
 static void siqs_archive_lp_relation(siqs_ctx_t *ctx, siqs_raw_relation_t *raw) {
   siqs_full_relation_t *column;
-  uint64_t labels[3] = {raw->lp1, raw->lp2, 1};
+  uint64_t labels[3] = {raw->lp1, raw->lp2, raw->lp3};
   siqs_factor_t tail[3];
   uint32_t i, ntail = 0, count, packed = 1;
   size_t bytes;

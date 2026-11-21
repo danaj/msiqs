@@ -39,21 +39,28 @@ my $temporary = tempdir('siqs-check-XXXXXX', TMPDIR => 1, CLEANUP => !$keep);
 my $root = File::Spec->rel2abs(File::Spec->catdir($Bin, '..'));
 my $binary = File::Spec->catfile($temporary, 'siqs-check');
 my @command = (shellwords($cc), shellwords($cflags));
+my @link_flags = shellwords($ldflags);
+my @thread_flags = ('-DPSIQS', '-pthread');
+my $atomics = 0;
 push @command, '-O1', '-g', '-fsanitize=address,undefined', '-fno-sanitize-recover=all'
   if $sanitize;
 push @command, '-UPSIQS', "-I$root";
 # Match build-siqs.pl: probe by compiling/linking, never by running it.
-unless (defined $threaded) {
+unless ($serial) {
   my $probe = File::Spec->catfile($temporary, 'pthread-probe');
-  my $log = File::Spec->catfile($temporary, 'pthread-probe.log');
-  {
-    local *STDOUT;
-    local *STDERR;
-    open STDOUT, '>', $log or die "cannot open $log: $!\n";
-    open STDERR, '>&', \*STDOUT or die "cannot redirect probe errors: $!\n";
-    $threaded = system(@command, '-pthread', '-o', $probe,
-                      File::Spec->catfile($root, 'tools', 'pthread-probe.c')) == 0;
-  }
+  my $atomic_probe = File::Spec->catfile($temporary, 'atomic-probe');
+  my $log = File::Spec->catfile($temporary, 'probe.log');
+  open my $stdout, '>&', \*STDOUT or die "cannot save stdout: $!\n";
+  open my $stderr, '>&', \*STDERR or die "cannot save stderr: $!\n";
+  open STDOUT, '>', $log or die "cannot open $log: $!\n";
+  open STDERR, '>&', \*STDOUT or die "cannot redirect probe errors: $!\n";
+  $threaded = system(@command, @thread_flags, '-o', $probe,
+                    File::Spec->catfile($root, 'tools', 'pthread-probe.c'), @link_flags) == 0
+    unless defined $threaded;
+  $atomics = system(@command, '-o', $atomic_probe,
+                   File::Spec->catfile($root, 'tools', 'atomic-probe.c'), @link_flags) == 0;
+  open STDOUT, '>&', $stdout or die "cannot restore stdout: $!\n";
+  open STDERR, '>&', $stderr or die "cannot restore stderr: $!\n";
 }
 if ($score_bits != 8) {
   open my $input, '<', File::Spec->catfile($root, 'siqs.c') or die $!;
@@ -73,11 +80,12 @@ if ($score_bits != 8) {
   push @command, '-DSIQS_CHECK_SOURCE="' . $copy . '"';
 }
 push @command, '-DSIQS_DEBUG' if $debug;
-push @command, '-DPSIQS', '-pthread' if $threaded;
+push @command, @thread_flags if $threaded;
+push @command, '-DSIQS_HAVE_RF_ATOMICS=1' if $threaded && $atomics;
 push @command, "-DSIQS_SIEVE_BLOCK_SIZE=$block" if defined $block;
 push @command, '-o', $binary, map {File::Spec->catfile($root, $_)}
   qw(tests/siqs-check.c pr32_iter.c tinyecm64.c);
-push @command, shellwords($ldflags);
+push @command, @link_flags;
 print "Building standalone SIQS checker ", ($threaded ? 'with pthreads' : 'serial-only'),
       ($sanitize ? ' (ASan/UBSan)' : ''), "\n";
 $| = 1;

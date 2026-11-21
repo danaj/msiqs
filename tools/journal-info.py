@@ -13,7 +13,7 @@ import time
 import zlib
 
 FRAME = struct.Struct('<IIQIIQQQII')
-PREAMBLE = b'MPUSIQJ\0'+struct.pack('<II',1,0x01020304)
+PREAMBLE = b'MPUSIQJ\0'+struct.pack('<II',2,0x01020304)
 MAX_FRAME = 64*1024*1024
 RELATION_NAMES = ('smooth','one_lp','two_lp','three_lp','four_lp')
 
@@ -86,14 +86,14 @@ UNSIGNED = '''bits policy_first_bits policy_last_bits max_large_primes fb_size
 half_interval q_count poly_d target_relations sieve_start sieve_free_units
 sieve_start_prime_floor fb_floor relation_extra multiplier_refine_divisor
 fixed_half_interval sieve_initial stage1_bias sieve_raw_scores sieve_saturating
-sieve_score_bound large_prime_bound smooth_bound'''.split()
+sieve_score_bound large_prime_bound smooth_bound tlp_cutoff'''.split()
 DOUBLES = '''lp_multiplier residual_multiplier sieve_start_index_exponent
 fb_coefficient interval_scale sieve_hit_exponent sieve_hit_bound_nominal
-sieve_hit_residual_multiplier sieve_hit_bound log_scale'''.split()
-# Version 1 keeps the historical SQUFOF slot; ECM uses the former rho slot.
+sieve_hit_residual_multiplier sieve_hit_bound log_scale tlp_smooth_bound'''.split()
 PROGRESS = '''families polynomials candidates split_attempts split_square split_siqs
-split_squfof split_ecm split_fail split_rejected la_rng cofactor_rng poly_rng
-full_relations retained_partials collection_target'''.split()
+split_squfof split_ecm split_fail split_rejected
+tlp_candidates tlp_batches tlp_gcd_one tlp_gcd_proper tlp_gcd_whole tlp_completed tlp_rejected
+la_rng cofactor_rng poly_rng stored_relations retained_partials collection_target full_relations'''.split()
 PROGRESS += ['length_'+str(i) for i in range(1,8)]+['length_8plus']
 
 
@@ -199,7 +199,7 @@ class Journal:
             require(len(result)<=MAX_FRAME and result.endswith(b'\n'),'incomplete or oversized ASCII header')
             return result
         require(line()==b'MPUSIQJ\n','invalid ASCII magic')
-        require(line()==b'Version: 1\n','unsupported ASCII version')
+        require(line()==b'Version: 2\n','unsupported ASCII version')
         require(line()==b'Byte-order: little-endian\n','unsupported ASCII byte order')
         number=line()
         require(number.startswith(b'N: ') and number[3:-1].isdigit(),'invalid ASCII input')
@@ -305,7 +305,8 @@ class Journal:
         require(snapshot['families']==ctx['families'],'family progress differs from events')
         full=snapshot['full_relations'];hist=[snapshot[key] for key in PROGRESS[-8:]]
         require(sum(hist)==full,'cycle histogram does not sum to completed relations')
-        require(full<=sum(ctx['relations'].values()),'more completed relations than raw records')
+        require(full<=snapshot['stored_relations']<=sum(ctx['relations'].values()),
+                'invalid stored/useful relation counts')
         require(snapshot['retained_partials']<=sum(ctx['relations'].values()),'invalid retained-partial count')
         require(snapshot['collection_target']<=0xffffffff,'collection target out of range')
         old=ctx['snapshot']

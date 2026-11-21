@@ -16,6 +16,7 @@ static void relation_context(siqs_ctx_t *ctx, siqs_factor_array_t *result,
   ctx->fb[0].p = 2; ctx->fb[1].p = 3;
   ctx->factor_counts = (uint32_t *)check_allocate(4, sizeof(uint32_t));
   ctx->factor_touched = (uint32_t *)check_allocate(4, sizeof(uint32_t));
+  ctx->factor_row_alloc = 3;  /* Usable rows; the fourth word is a canary. */
   ctx->factor_counts[3] = ctx->factor_touched[3] = RELATION_CANARY;
   siqs_factor_array_init(result, ctx->n);
   ctx->result = result;

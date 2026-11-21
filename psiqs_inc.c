@@ -22,14 +22,16 @@ typedef struct psiqs_pool_t psiqs_pool_t;
 # define PSIQS_PUBLICATION_POLYNOMIALS 0U
 #endif
 
+
 typedef enum { PSIQS_IDLE, PSIQS_WORK, PSIQS_READY } psiqs_worker_state_t;
+typedef enum { PSIQS_TASK_SIEVE, PSIQS_TASK_GCD } psiqs_worker_task_t;
 
 typedef struct {
   siqs_ctx_t ctx;
   siqs_poly_t poly;
   siqs_factor_array_t result;
-  uint32_t limit;
-  uint32_t polynomials;
+  uint32_t limit;        /* Reserved polynomial budget for this publication. */
+  uint32_t polynomials;  /* Work since the previous publication. */
   uint32_t family_polynomials;
   int family_assigned;
   psiqs_pool_t *pool;
@@ -37,8 +39,14 @@ typedef struct {
   pthread_cond_t work;
   uint32_t index;
   psiqs_worker_state_t state;
+  psiqs_worker_task_t task;
+  siqs_tlp_gcd_job_t *gcd_job;
+  uint32_t gcd_reserved; /* Coordinator-owned sieve tail held during a GCD. */
   int started;
   int scratch_initialized; /* Independent of thread lifetime and condition. */
+#ifdef SIQS_TIMING
+  uint64_t published_at;
+#endif
 } psiqs_worker_t;
 
 struct psiqs_pool_t {
@@ -46,19 +54,61 @@ struct psiqs_pool_t {
   uint32_t *ready;
   uint32_t count, initialized, conditions, live;
   uint32_t head, tail, queued;
-  uint32_t publication_polynomials; /* Coordinator-owned; workers read under mutex. */
   pthread_mutex_t mutex;
   pthread_cond_t done;
+  uint32_t publication_polynomials; /* Coordinator-owned; workers read under mutex. */
   int stop;
+  siqs_ctx_t *master;
+  psiqs_worker_t *merging_worker; /* Coordinator-only dispatch opportunity. */
+  int merging_dispatched;
+#ifdef SIQS_TIMING
+  int timing_enabled;
+#endif
 };
 
-/* The coordinator can request earlier delivery without abandoning A.
- * Running workers observe changes at the existing 32-polynomial stop poll. */
+/* The coordinator can shorten a running publication without changing its
+ * reserved work or polynomial state. Workers observe the request at the
+ * existing stop checkpoint; zero allows a whole family, subject to buffers. */
 static void psiqs_pool_set_publication_interval(psiqs_pool_t *pool,
                                                 uint32_t polynomials) {
   pthread_mutex_lock(&pool->mutex);
   pool->publication_polynomials = polynomials;
   pthread_mutex_unlock(&pool->mutex);
+}
+
+/* Reuse the parked worker whose raw buffer the coordinator is consuming.
+ * A GCD task never touches that buffer, sieve scratch or factor partition.
+ * The completed sieve reservation has already been refunded/accounted; this
+ * task reserves no polynomial work and may be dispatched only once per merge. */
+static int psiqs_pool_submit_gcd(void *data, struct siqs_tlp_gcd_job *job) {
+  psiqs_pool_t *pool = (psiqs_pool_t *)data;
+  psiqs_worker_t *worker;
+  int dispatched = 0;
+  if (pool == NULL || job == NULL || pool->master == NULL ||
+      pool->master->params.max_large_primes != 3 || pool->master->factor_found ||
+      pool->merging_dispatched || (worker = pool->merging_worker) == NULL)
+    return 0;
+  pthread_mutex_lock(&pool->mutex);
+  if (!pool->stop && worker->started && worker->state == PSIQS_IDLE &&
+      worker->task == PSIQS_TASK_SIEVE && !worker->ctx.factor_found) {
+    worker->task = PSIQS_TASK_GCD;
+    worker->gcd_job = job;
+    worker->limit = worker->polynomials = 0;
+    worker->state = PSIQS_WORK;
+    pool->merging_dispatched = 1;
+    pthread_cond_signal(&worker->work);
+    dispatched = 1;
+  }
+  pthread_mutex_unlock(&pool->mutex);
+  return dispatched;
+}
+
+static void psiqs_pool_unbind_gcd(psiqs_pool_t *pool) {
+  if (pool->master != NULL && pool->master->tlp_submit_data == pool) {
+    pool->master->tlp_submit_gcd = NULL;
+    pool->master->tlp_submit_data = NULL;
+  }
+  pool->merging_worker = NULL;
 }
 
 /* Workers own every writable field and borrow the collector's immutable FB
@@ -70,6 +120,10 @@ static void psiqs_worker_init(psiqs_worker_t *worker,
   memset(worker, 0, sizeof(*worker));
   ctx->original_n = master->original_n;
   ctx->params = master->params;
+  ctx->tlp_policy = master->tlp_policy;
+#if SIQS_RESIDUAL_FIRST
+  ctx->residual_first = master->residual_first;
+#endif
   ctx->multiplier = master->multiplier;
   ctx->largest_fb_prime = master->largest_fb_prime;
   ctx->buffer_relations = 1;
@@ -79,11 +133,13 @@ static void psiqs_worker_init(psiqs_worker_t *worker,
   mpz_init(ctx->eval.y);
   mpz_init(ctx->eval.q);
   mpz_init(ctx->eval.rest);
+  mpz_init_set(ctx->tlp_upper, master->tlp_upper);
   ctx->shared_fb_tables = 1;
   ctx->fb = master->fb;
   ctx->prime = master->prime;
   ctx->fb_reciprocal = master->fb_reciprocal;
   ctx->sieve_logp = master->sieve_logp;
+  ctx->resieve_model = master->resieve_model;
   ctx->cofactor_rng.state = siqs_mix64(
       master->cofactor_rng.state ^
       ((uint64_t)index + 1U) * UINT64_C(0x9e3779b97f4a7c15));
@@ -94,7 +150,9 @@ static void psiqs_worker_init(psiqs_worker_t *worker,
   worker->scratch_initialized = 1;
 }
 
-/* Select distinct A values serially, then let each worker initialize roots. */
+/* Reserve work without changing the current polynomial. Checkpoint requests
+ * and buffer bounds can publish early; the coordinator refunds unused work.
+ * Remaining polynomials stay with this worker and the same A family. */
 static void psiqs_prepare_publication(psiqs_worker_t *worker, uint32_t limit) {
   uint32_t remaining = worker->poly.b_limit - worker->family_polynomials;
   /* Standalone polynomial preparation, including benchmarks, has no pool. */
@@ -106,6 +164,7 @@ static void psiqs_prepare_publication(psiqs_worker_t *worker, uint32_t limit) {
   worker->polynomials = 0;
 }
 
+/* Select distinct A values serially, then let each worker initialize roots. */
 static int psiqs_assign_family(siqs_ctx_t *master, siqs_poly_t *dispatch,
                                psiqs_worker_t *worker, uint32_t limit) {
   siqs_ctx_t *ctx = &worker->ctx;
@@ -150,7 +209,9 @@ static void *psiqs_sieve_family(void *argument) {
     siqs_sieve_polynomial(ctx, poly);
     worker->polynomials++;
     worker->family_polynomials++;
-    if (ctx->factor_found || worker->polynomials >= worker->limit)
+    if (ctx->factor_found || worker->polynomials >= worker->limit ||
+        (ctx->params.max_large_primes == 3 &&
+         ctx->raw_count >= SIQS_TLP_WORKER_RELATION_TARGET))
       break;
     /* A q=12 family has 2048 polynomials.  At readiness, finish only
      * a short prefix instead of delaying join for the rest of that family.
@@ -187,12 +248,41 @@ static void psiqs_raw_arena_reset(siqs_raw_arena_t *arena) {
   }
 }
 
+#ifdef SIQS_TIMING
+/* A parked worker owns no live writes. Also call after join for terminal
+ * parked time that was accumulated after its last ordinary handoff. */
+static void psiqs_merge_profile(siqs_ctx_t *master, psiqs_worker_t *worker) {
+#define SIQS_PROFILE_MERGE(name) \
+  master->result->profile.name += worker->result.profile.name; \
+  worker->result.profile.name = 0;
+  SIQS_PROFILE_FIELDS(SIQS_PROFILE_MERGE)
+#undef SIQS_PROFILE_MERGE
+}
+#endif
+
+/* A READY event returns only its executor. The job may already have been
+ * reaped and reused on another worker, so never inspect it through this slot. */
+static uint32_t psiqs_release_gcd_worker(siqs_ctx_t *master, psiqs_worker_t *worker) {
+  uint32_t reserved = worker->gcd_reserved;
+  worker->gcd_reserved = 0;
+  worker->task = PSIQS_TASK_SIEVE;
+  worker->gcd_job = NULL;
+#ifdef SIQS_TIMING
+  psiqs_merge_profile(master, worker);
+#endif
+  siqs_tlp_poll(master);
+  return reserved;
+}
+
 /* Copy buffered records into the collector's arena; never transfer pointers
  * between arenas.  All partials enter the same graph, including cross-worker
  * cycles.  Clear worker GMP values before resetting its buffer storage. */
 static void psiqs_merge_worker(siqs_ctx_t *master, psiqs_worker_t *worker) {
   siqs_ctx_t *ctx = &worker->ctx;
   uint32_t i;
+#ifdef SIQS_TIMING
+  uint64_t timing_start = master->params.bits >= SIQS_TIMING_MIN_BITS ? siqs_timing_now() : 0;
+#endif
   master->total_candidates += ctx->total_candidates;
   master->split_attempts += ctx->split_attempts;
   master->split_square += ctx->split_square;
@@ -201,6 +291,14 @@ static void psiqs_merge_worker(siqs_ctx_t *master, psiqs_worker_t *worker) {
   master->split_ecm += ctx->split_ecm;
   master->split_fail += ctx->split_fail;
   master->split_rejected += ctx->split_rejected;
+  master->tlp_candidates += ctx->tlp_candidates; ctx->tlp_candidates = 0;
+  if (ctx->params.max_large_primes == 3) {
+    master->tlp_r2_attempts += ctx->tlp_r2_attempts; ctx->tlp_r2_attempts = 0;
+    master->tlp_r2_resolved += ctx->tlp_r2_resolved; ctx->tlp_r2_resolved = 0;
+    master->tlp_r2_rejected += ctx->tlp_r2_rejected; ctx->tlp_r2_rejected = 0;
+    master->tlp_r2_fallback += ctx->tlp_r2_fallback; ctx->tlp_r2_fallback = 0;
+    master->tlp_gap_rejected += ctx->tlp_gap_rejected; ctx->tlp_gap_rejected = 0;
+  }
 #ifdef SIQS_TIMING
   master->result->cofactor_time += worker->result.cofactor_time;
   master->result->cofactor_calls += worker->result.cofactor_calls;
@@ -210,6 +308,7 @@ static void psiqs_merge_worker(siqs_ctx_t *master, psiqs_worker_t *worker) {
   master->result->primality_composite += worker->result.primality_composite;
   worker->result.primality_time = worker->result.primality_prime =
       worker->result.primality_composite = 0;
+  psiqs_merge_profile(master, worker);
 #endif
   ctx->total_candidates = 0;
   ctx->split_attempts = 0;
@@ -238,15 +337,38 @@ static void psiqs_merge_worker(siqs_ctx_t *master, psiqs_worker_t *worker) {
         factors[j].row = siqs_raw_factor_row(raw, j);
         factors[j].exponent = siqs_raw_factor_exponent(raw, j);
       }
-      copy = siqs_raw_relation_new(master, raw->y, factors,
-                                   raw->nfactors, raw->lp1, raw->lp2);
-      siqs_accept_raw_relation(master, copy);
+#if SIQS_RESIDUAL_FIRST
+      if (raw->rf_norm != NULL) {
+        copy = siqs_rf_packet_new(&master->rf->pending_arena, raw->y,
+            factors, raw->nfactors, raw->rf_norm->norm, raw->rf_norm->distinct);
+        siqs_rf_queue(master, copy);
+      } else
+#endif
+      if (raw->lp3 == 0) {
+        uint64_t words[2] = {raw->lp1, raw->lp2};
+        mpz_import(master->eval.rest, 2, -1, sizeof(uint64_t), 0, 0, words);
+        copy = siqs_tlp_pending_new(master, raw->y, factors, raw->nfactors, master->eval.rest);
+        siqs_tlp_queue(master, copy);
+      } else {
+        copy = siqs_raw_relation_new3(master, raw->y, factors,
+            raw->nfactors, raw->lp1, raw->lp2, raw->lp3);
+        siqs_accept_raw_relation(master, copy);
+      }
     }
   }
+#if SIQS_RESIDUAL_FIRST
+  if (master->rf != NULL) siqs_rf_maybe_submit(master);
+#endif
   while (ctx->raw_count != 0)
     siqs_raw_relation_free(ctx, ctx->raw[--ctx->raw_count]);
   psiqs_raw_arena_reset(&ctx->raw_arena);
-  if (master->journal != NULL) sj_flush(master);
+  if (master->journal != NULL) {
+    if (master->params.max_large_primes == 3) sj_maybe_flush(master);
+    else sj_flush(master);
+  }
+#ifdef SIQS_TIMING
+  if (timing_start) master->result->profile.merge_us += siqs_timing_elapsed(timing_start);
+#endif
 }
 
 static void psiqs_worker_clear(psiqs_worker_t *worker) {
@@ -260,24 +382,67 @@ static void psiqs_worker_clear(psiqs_worker_t *worker) {
   worker->scratch_initialized = 0;
 }
 
-/* Each worker has one result buffer.  Publishing it parks that worker until
- * the caller finishes merging and assigns another family.  Other workers
- * continue independently; the queue never holds more than one result each. */
+/* Each worker has one sieve-result buffer. A GCD task can use that same thread
+ * while the caller consumes its buffer. It touches only the submitted job,
+ * then publishes a distinct completion event. The queue still holds at most
+ * one event per worker; every ordinary publication parks its producer. */
 static void *psiqs_pool_worker(void *argument) {
   psiqs_worker_t *worker = (psiqs_worker_t *)argument;
   psiqs_pool_t *pool = worker->pool;
+#ifdef SIQS_TIMING
+  int timing = worker->ctx.params.bits >= SIQS_TIMING_MIN_BITS;
+  uint64_t active_start = 0, cpu_start = 0;
+#endif
   pthread_mutex_lock(&pool->mutex);
   for (;;) {
+    int gcd_task;
     while (!pool->stop && worker->state != PSIQS_WORK)
       pthread_cond_wait(&worker->work, &pool->mutex);
-    if (pool->stop)
+    if (pool->stop
+        && !(worker->state == PSIQS_WORK && worker->task == PSIQS_TASK_GCD)
+       ) {
+#ifdef SIQS_TIMING
+      if (timing && worker->published_at != 0) {
+        worker->result.profile.worker_parked_us += siqs_timing_elapsed(worker->published_at);
+        worker->published_at = 0;
+      }
+#endif
       break;
+    }
+    gcd_task = worker->task == PSIQS_TASK_GCD;
+#ifdef SIQS_TIMING
+    if (timing) {
+      if (worker->published_at != 0) {
+        worker->result.profile.worker_parked_us += siqs_timing_elapsed(worker->published_at);
+        worker->published_at = 0;
+      }
+      /* GCD work has its own job CPU/wall observations. Do not count it as
+       * sieve activity, polynomials, or a sieve publication. */
+      if (!gcd_task)
+      { active_start = siqs_timing_now(); cpu_start = siqs_timing_cpu_now(); }
+    }
+#endif
     pthread_mutex_unlock(&pool->mutex);
-    psiqs_sieve_family(worker);
+    if (gcd_task) siqs_tlp_gcd_job_run(worker->gcd_job);
+    else
+      psiqs_sieve_family(worker);
+#ifdef SIQS_TIMING
+    if (timing
+        && !gcd_task
+       ) {
+      worker->result.profile.worker_active_us += siqs_timing_elapsed(active_start);
+      worker->result.profile.worker_cpu_us += siqs_timing_cpu_now() - cpu_start;
+      worker->result.profile.worker_polynomials += worker->polynomials;
+      ++worker->result.profile.publications;
+    }
+#endif
     pthread_mutex_lock(&pool->mutex);
     worker->state = PSIQS_READY;
+#ifdef SIQS_TIMING
+    if (timing) worker->published_at = siqs_timing_now();
+#endif
     if (pool->queued >= pool->count)
-      croak("PSIQS: completed-family queue overflow");
+      croak("PSIQS: completed-task queue overflow");
     pool->ready[pool->tail] = worker->index;
     if (++pool->tail == pool->count)
       pool->tail = 0;
@@ -289,8 +454,9 @@ static void *psiqs_pool_worker(void *argument) {
 }
 
 /* Stop assigning work, finish short polynomial prefixes of running families,
- * and cancel jobs not yet begun.  Unrun family tails are not resumed on retry.
- * The caller drains completed buffers after joining, before freeing scratch. */
+ * and cancel sieve jobs not yet begun. Assigned GCD jobs must finish, including
+ * ones not yet begun, so the caller's final batch drain cannot wait forever.
+ * Unrun family tails are not resumed on retry. */
 static void psiqs_pool_join(psiqs_pool_t *pool) {
   uint32_t i;
   if (pool->live == 0)
@@ -317,6 +483,7 @@ static void psiqs_pool_destroy(psiqs_pool_t *pool) {
   if (pool == NULL)
     return;
   psiqs_pool_join(pool);
+  psiqs_pool_unbind_gcd(pool);
   for (i = 0; i < pool->conditions; i++)
     pthread_cond_destroy(&pool->workers[i].work);
   pthread_cond_destroy(&pool->done);
@@ -336,13 +503,19 @@ static psiqs_pool_t *psiqs_pool_create(siqs_ctx_t *ctx) {
   if (pool == NULL)
     return NULL;
   pool->count = ctx->nthreads;
+  pool->master = ctx;
+#ifdef SIQS_TIMING
+  pool->timing_enabled = ctx->params.bits >= SIQS_TIMING_MIN_BITS;
+#endif
   pool->workers = (psiqs_worker_t *)calloc(pool->count, sizeof(*pool->workers));
   pool->ready = (uint32_t *)malloc((size_t)pool->count * sizeof(*pool->ready));
   if (pool->workers == NULL || pool->ready == NULL)
     goto fail_mutex;
   if (pthread_mutex_init(&pool->mutex, NULL) != 0)
     goto fail_mutex;
-  psiqs_pool_set_publication_interval(pool, PSIQS_PUBLICATION_POLYNOMIALS);
+  psiqs_pool_set_publication_interval(pool,
+      ctx->params.max_large_primes == 3
+        ? SIQS_TLP_WORKER_PUBLISH_POLYNOMIALS : PSIQS_PUBLICATION_POLYNOMIALS);
   if (pthread_cond_init(&pool->done, NULL) != 0)
     goto fail_done;
   for (i = 0; i < pool->count; i++) {
@@ -375,6 +548,10 @@ static psiqs_pool_t *psiqs_pool_create(siqs_ctx_t *ctx) {
     psiqs_pool_destroy(pool);
     return NULL;
   }
+  if (ctx->params.max_large_primes == 3) {
+    ctx->tlp_submit_gcd = psiqs_pool_submit_gcd;
+    ctx->tlp_submit_data = pool;
+  }
   return pool;
 
 fail_done:
@@ -398,6 +575,8 @@ static int psiqs_pool_assign(psiqs_pool_t *pool, siqs_ctx_t *ctx,
     psiqs_prepare_publication(worker, limit);
   }
   pthread_mutex_lock(&pool->mutex);
+  worker->task = PSIQS_TASK_SIEVE;
+  worker->gcd_job = NULL;
   worker->state = PSIQS_WORK;
   pthread_cond_signal(&worker->work);
   pthread_mutex_unlock(&pool->mutex);
@@ -407,6 +586,9 @@ static int psiqs_pool_assign(psiqs_pool_t *pool, siqs_ctx_t *ctx,
 /* Taking a result acquires every write made by that worker before publication. */
 static psiqs_worker_t *psiqs_pool_take(psiqs_pool_t *pool) {
   psiqs_worker_t *worker;
+#ifdef SIQS_TIMING
+  uint64_t start = pool->timing_enabled ? siqs_timing_now() : 0;
+#endif
   pthread_mutex_lock(&pool->mutex);
   while (pool->queued == 0)
     pthread_cond_wait(&pool->done, &pool->mutex);
@@ -416,11 +598,14 @@ static psiqs_worker_t *psiqs_pool_take(psiqs_pool_t *pool) {
   pool->queued--;
   worker->state = PSIQS_IDLE;
   pthread_mutex_unlock(&pool->mutex);
+#ifdef SIQS_TIMING
+  if (start) worker->result.profile.ready_wait_us += siqs_timing_elapsed(start);
+#endif
   return worker;
 }
 
 /* A bounded, asynchronous A-family pool: no per-polynomial locks or graph
- * sharing.  Poll for stop every 32 polynomials under the existing mutex.
+ * sharing. Poll stop/publication requests together every 32 polynomials.
  * Reserve polynomial budgets on assignment, refund unused work on
  * completion, and join every thread before the matrix solver can run. */
 static int psiqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *dispatch,
@@ -439,7 +624,8 @@ static int psiqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *dispatch,
     check_interval = SIQS_MATRIX_CHECK_MIN;
   if (check_interval > SIQS_MATRIX_CHECK_MAX)
     check_interval = SIQS_MATRIX_CHECK_MAX;
-  if (ctx->factor_found || (ctx->use_bids ? ctx->bids_stop : siqs_relation_count(ctx) >= target))
+  if (ctx->factor_found || (ctx->use_bids ? ctx->bids_stop :
+      siqs_relation_target_reached(ctx, target)))
     return 1;
   if (*poly_count >= max_polynomials)
     return 0;
@@ -472,21 +658,38 @@ static int psiqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *dispatch,
   }
   while (active != 0) {
     psiqs_worker_t *worker = psiqs_pool_take(pool);
+    int dispatched = 0;
+    uint32_t unused = 0;
     active--;
-    remaining += worker->limit - worker->polynomials;
-    if (worker->polynomials != 0 &&
-        worker->family_polynomials == worker->polynomials)
-      (*family_count)++;
-    *poly_count += worker->polynomials;
-    psiqs_merge_worker(ctx, worker);
+    if (worker->task == PSIQS_TASK_GCD) {
+      remaining += psiqs_release_gcd_worker(ctx, worker);
+    } else {
+      unused = worker->limit - worker->polynomials;
+      remaining += unused;
+      if (worker->polynomials != 0 &&
+          worker->family_polynomials == worker->polynomials)
+        (*family_count)++;
+      *poly_count += worker->polynomials;
+      pool->merging_worker = worker;
+      pool->merging_dispatched = 0;
+      psiqs_merge_worker(ctx, worker);
+      dispatched = pool->merging_dispatched;
+      pool->merging_worker = NULL;
+      if (dispatched) {
+        /* Keep this family's previous reservation while its executor does GCD.
+         * Other workers must not spend its tail on newly assigned A families. */
+        worker->gcd_reserved = unused;
+        remaining -= unused;
+        active++;
+      }
+      siqs_tlp_poll(ctx);
+    }
     if (!ctx->use_bids && siqs_relation_count(ctx) >= *next_matrix_check && !ctx->factor_found) {
       uint32_t rows, columns;
       ready = siqs_matrix_ready(ctx, &rows, &columns);
       *next_matrix_check = siqs_relation_count(ctx) + check_interval;
       if (!ready && verbose > 2) {
-        printf("# siqs matrix core %u columns, %u rows%s\n",
-               columns, rows, ready ? ", ready" : "");
-        fflush(stdout);
+        siqs_print_matrix_progress(ctx, rows, columns, ready);
       }
       if (ready) {
         complete = 1;
@@ -500,11 +703,14 @@ static int psiqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *dispatch,
       last_report_polys = *poly_count;
       next_report = *poly_count + report_step;
     }
-    if (ctx->factor_found || (ctx->use_bids ? ctx->bids_stop : siqs_relation_count(ctx) >= target)) {
+    if (ctx->factor_found || (ctx->use_bids ? ctx->bids_stop :
+      siqs_relation_target_reached(ctx, target))) {
       complete = 1;
       break;
     }
-    if (remaining != 0 && (!exhausted ||
+    if (
+        !dispatched &&
+        remaining != 0 && (!exhausted ||
         worker->family_polynomials < worker->poly.b_limit)) {
       uint32_t limit = dispatch->b_limit < remaining
                      ? dispatch->b_limit : (uint32_t)remaining;
@@ -523,6 +729,10 @@ static int psiqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *dispatch,
   for (i = 0; i < pool->count; i++) {
     psiqs_worker_t *worker = pool->workers + i;
     if (worker->state == PSIQS_READY) {
+      if (worker->task == PSIQS_TASK_GCD) {
+        (void)psiqs_release_gcd_worker(ctx, worker);
+        continue;
+      }
       if (worker->polynomials != 0 &&
           worker->family_polynomials == worker->polynomials)
         (*family_count)++;
@@ -530,9 +740,19 @@ static int psiqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *dispatch,
       psiqs_merge_worker(ctx, worker);
     }
   }
+#ifdef SIQS_TIMING
+  for (i = 0; i < pool->count; i++) psiqs_merge_profile(ctx, pool->workers + i);
+#endif
+  siqs_tlp_flush(ctx);
+  psiqs_pool_unbind_gcd(pool);
+  if (ctx->params.max_large_primes == 3 && !ctx->factor_found) {
+    uint32_t rows, columns;
+    if (siqs_matrix_ready(ctx, &rows, &columns)) complete = ready = 1;
+  }
   if (verbose > 0)
     siqs_print_polynomial_notice(ctx, *poly_count);
-  if (ctx->factor_found || (ctx->use_bids ? ctx->bids_stop : siqs_relation_count(ctx) >= target))
+  if (ctx->factor_found || (ctx->use_bids ? ctx->bids_stop :
+      siqs_relation_target_reached(ctx, target)))
     complete = 1;
   if (ready && verbose > 1) {
     uint32_t rows, columns;
@@ -540,21 +760,11 @@ static int psiqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *dispatch,
     siqs_print_relation_report(ctx, target, *poly_count);
     last_report_count = siqs_relation_count(ctx);
     last_report_polys = *poly_count;
-    printf("# siqs matrix core %u columns, %u rows, ready\n", columns, rows);
-    fflush(stdout);
+    siqs_print_matrix_progress(ctx, rows, columns, 1);
   }
   if (verbose > 1 &&
       (last_report_count != siqs_relation_count(ctx) || last_report_polys != *poly_count))
     siqs_print_relation_report(ctx, target, *poly_count);
   psiqs_pool_destroy(pool);
   return complete;
-}
-
-/* Same partition contract as gmp_siqs; worker count belongs to this call. */
-mpz_t *gmp_psiqs(const mpz_t n, uint32_t *nfactors,
-                 uint32_t trial_start, int verbose, uint32_t nthreads) {
-  if (nthreads == 0 || nthreads > PSIQS_MAX_THREADS)
-    croak("PSIQS: worker count must be between 1 and %u",
-          (unsigned)PSIQS_MAX_THREADS);
-  return siqs_factor(n, nfactors, trial_start, verbose, nthreads);
 }

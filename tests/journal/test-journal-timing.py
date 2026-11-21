@@ -59,16 +59,18 @@ with tempfile.TemporaryDirectory(prefix='journal-timing-',dir=RESULTS) as direct
     batch=next(f for f in parsed if f[2]==3)
     records=reference.compact_relations(data,parsed)
     starts=[r['lp_at']-2 for r in records]
-    family=data[batch[0]+info.FRAME.size+192:starts[0]]
+    family=data[batch[0]+info.FRAME.size+8*len(info.PROGRESS):starts[0]]
     relations=[data[start:end] for start,end in zip(starts,starts[1:]+[batch[1]])]
     assert len(relations)==3
 
     def progress(index):
-        snapshot=[0]*24;snapshot[0]=1;snapshot[2]=index+1
-        snapshot[10:13]=[1,2,3]
-        snapshot[13]=(1,1,2)[index];snapshot[14]=(0,1,1)[index]
-        snapshot[15]=100;snapshot[16]=snapshot[13]
-        return struct.pack('<24Q',*snapshot)
+        values=dict.fromkeys(info.PROGRESS,0)
+        full=(1,1,2)[index]
+        values.update(families=1,candidates=index+1,la_rng=1,cofactor_rng=2,poly_rng=3,
+                      stored_relations=full,full_relations=full,retained_partials=(0,1,1)[index],
+                      collection_target=100,length_1=full)
+        return struct.pack('<'+str(len(info.PROGRESS))+'Q',*(values[k]for k in info.PROGRESS))
+
 
     def record(index, run, elapsed):
         events=(family if index==0 else b'')+relations[index]

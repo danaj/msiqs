@@ -38,16 +38,19 @@ static int verbose_level = 0;  /* -v summaries, -vv progress, -vvv diagnostics. 
 static void print_usage(FILE *stream, const char *program) {
   fprintf(stream,
 #ifdef PSIQS
-          "usage: %s [-v|--verbose] [-threads N] [--] [INTEGER ...]\n"
+          "usage: %s [-v|--verbose] [-threads N] [--2lp|--3lp] [--] [INTEGER ...]\n"
           "Factor positive decimal integers with msiqs.\n"
           "Use -threads N to select 1-%u workers (default 1); "
           "one worker uses serial SIQS.\n"
           "-t and --threads are aliases for -threads.\n"
 #else
-          "usage: %s [-v|--verbose] [--] [INTEGER ...]\n"
+          "usage: %s [-v|--verbose] [--2lp|--3lp] [--] [INTEGER ...]\n"
           "Factor positive decimal integers with msiqs.\n"
 #endif
           "Repeat -v for increasingly detailed progress output.\n"
+          "Default: ordinary policies through 360 bits, 3LP from 361 bits (post-trial).\n"
+          "--2lp forces ordinary policies; --3lp requests 3LP wherever supported.\n"
+          "These options are mutually exclusive; unsupported 3LP sizes use ordinary policies.\n"
           "Without --journal or INTEGER arguments, read integers from stdin.\n"
           "--journal FILE N creates or resumes a journal for N.\n"
           "--journal FILE resumes using N from the existing journal.\n"
@@ -108,14 +111,12 @@ static void append_factor(siqs_factor_list_t *list, const mpz_t factor) {
 
 /* Revisit only strictly smaller composites, never an unsplit cofactor. */
 static int collect_factors(const mpz_t n, siqs_factor_list_t *output,
-                           uint32_t nthreads, siqs_journal_t *journal) {
+                           uint32_t nthreads, siqs_journal_t *journal,
+                           uint32_t flags) {
   siqs_factor_list_t pending = {NULL, 0, 0};
   mpz_t current;
   int complete = 1;
 
-#ifndef PSIQS
-  (void)nthreads;
-#endif
   mpz_init(current);
   append_factor(&pending, n);
   while (pending.count != 0) {
@@ -126,13 +127,9 @@ static int collect_factors(const mpz_t n, siqs_factor_list_t *output,
     mpz_clear(pending.values[pending.count]);
     if (journal != NULL)
       partition = gmp_siqs_journal_factor(journal, current, &count, 2,
-                                         verbose_level, nthreads);
+                                          verbose_level, nthreads, flags);
     else
-#ifdef PSIQS
-    partition = gmp_psiqs(current, &count, 2, verbose_level, nthreads);
-#else
-    partition = gmp_siqs(current, &count, 2, verbose_level);
-#endif
+      partition = gmp_siqs(current, &count, 2, verbose_level, nthreads, flags);
     for (i = 0; i < count; i++) {
       if (mpz_probab_prime_p(partition[i], 15)) {
         append_factor(output, partition[i]);
@@ -161,7 +158,8 @@ static void sort_factors(siqs_factor_list_t *output) {
 }
 
 /* Takes ownership of the optional journal; finish validation before output. */
-static int factor_number(const mpz_t n, uint32_t nthreads, siqs_journal_t *journal) {
+static int factor_number(const mpz_t n, uint32_t nthreads, siqs_journal_t *journal,
+                         uint32_t flags) {
   siqs_factor_list_t output = {NULL, 0, 0};
   size_t i;
   int complete;
@@ -174,7 +172,7 @@ static int factor_number(const mpz_t n, uint32_t nthreads, siqs_journal_t *journ
     if (journal != NULL) {
       uint32_t count;
       mpz_t *values = gmp_siqs_journal_factor(journal, n, &count, 2,
-                                             verbose_level, nthreads);
+                                              verbose_level, nthreads, flags);
       gmp_siqs_free(values, count);
       gmp_siqs_journal_finish(journal, NULL, 0, 1);
       gmp_siqs_journal_close(journal);
@@ -183,7 +181,7 @@ static int factor_number(const mpz_t n, uint32_t nthreads, siqs_journal_t *journ
     return 0;
   }
 
-  complete = collect_factors(n, &output, nthreads, journal);
+  complete = collect_factors(n, &output, nthreads, journal, flags);
   sort_factors(&output);
   gmp_siqs_journal_finish(journal, output.values, output.count, complete);
   gmp_siqs_journal_close(journal);
@@ -211,6 +209,7 @@ int main(int argc, char **argv) {
   mpz_t n;
   int argument = 1, status = 0;
   uint32_t nthreads = 1;
+  uint32_t flags = 0;
   const char *journal_path = NULL;
 
   while (argument < argc && argv[argument][0] == '-') {
@@ -224,6 +223,17 @@ int main(int argc, char **argv) {
     if (strcmp(option, "-h") == 0 || strcmp(option, "--help") == 0) {
       print_usage(stdout, argv[0]);
       return 0;
+    }
+    if (strcmp(option, "--2lp") == 0 || strcmp(option, "--3lp") == 0) {
+      uint32_t selection = strcmp(option, "--2lp") == 0
+                         ? SIQS_OPTION_2LP : SIQS_OPTION_3LP;
+      if (flags != 0 && flags != selection) {
+        fprintf(stderr, SIQS_PROGRAM_NAME ": --2lp and --3lp are mutually exclusive\n");
+        return 2;
+      }
+      flags = selection;
+      argument++;
+      continue;
     }
     if (strcmp(option, "--journal") == 0) {
       if (journal_path != NULL || argument + 1 == argc || argv[argument + 1][0] == '\0') {
@@ -300,11 +310,11 @@ int main(int argc, char **argv) {
       }
     }
     if (supplied && mpz_sgn(n) <= 0) {
-      status = factor_number(n, nthreads, NULL);
+      status = factor_number(n, nthreads, NULL, flags);
     } else {
       journal = gmp_siqs_journal_open(journal_path, supplied ? n : NULL);
       gmp_siqs_journal_input(journal, n);
-      status = factor_number(n, nthreads, journal);
+      status = factor_number(n, nthreads, journal, flags);
     }
   } else if (argument < argc) {
     for (; argument < argc; argument++) {
@@ -314,13 +324,13 @@ int main(int argc, char **argv) {
         status = 2;
         continue;
       }
-      if (factor_number(n, nthreads, NULL) != 0 && status == 0)
+      if (factor_number(n, nthreads, NULL, flags) != 0 && status == 0)
         status = 1;
     }
   } else {
     int scanned;
     while ((scanned = gmp_scanf("%Zd", n)) == 1)
-      if (factor_number(n, nthreads, NULL) != 0 && status == 0)
+      if (factor_number(n, nthreads, NULL, flags) != 0 && status == 0)
         status = 1;
     if (scanned != EOF) {
       fprintf(stderr, SIQS_PROGRAM_NAME ": invalid input on stdin\n");

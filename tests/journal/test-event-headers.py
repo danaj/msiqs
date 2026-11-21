@@ -41,10 +41,12 @@ def magnitude(n):
     return struct.pack('<I',len(data))+data
 
 def snapshot(families=0, partials=0, target=1):
-    values=[0]*24;values[0]=families;values[10:13]=[1,2,3]
-    values[2]=values[3]=values[5]=partials
-    values[14]=partials;values[15]=target
-    return struct.pack('<24Q',*values)
+    values=dict.fromkeys(info.PROGRESS,0)
+    values.update(families=families,la_rng=1,cofactor_rng=2,poly_rng=3,
+                  candidates=partials,split_attempts=partials,split_siqs=partials,
+                  retained_partials=partials,collection_target=target)
+    return struct.pack('<'+str(len(info.PROGRESS))+'Q',*(values[k]for k in info.PROGRESS))
+
 
 with tempfile.TemporaryDirectory(prefix='event-headers-',dir=RESULTS) as directory:
     tmp=Path(directory);path=tmp/'events.journal'
@@ -63,7 +65,7 @@ with tempfile.TemporaryDirectory(prefix='event-headers-',dir=RESULTS) as directo
     print('PASS C smooth/1LP/2LP encoding, byte accounting, congruences and replay',flush=True)
 
     batch=next(f for f in parsed if f[2]==3);start,end,_,count=batch
-    event=start+info.FRAME.size+192
+    event=start+info.FRAME.size+8*len(info.PROGRESS)
     assert data[event]==2
     relation=next(v for v in records if start<=v['lp_at']<end)
     corruptions=[('unknown-kind',relation['lp_at']-2,255),
@@ -84,7 +86,7 @@ with tempfile.TemporaryDirectory(prefix='event-headers-',dir=RESULTS) as directo
 
     # Synthetic, mathematically valid congruences modulo 77, not factor jobs:
     # 1^2 = 3*3*137 (mod 77); 2^2 = 3*3*3*3 (mod 77).
-    prefix=b'MPUSIQJ\nVersion: 1\nByte-order: little-endian\nN: 77\n--\n'+info.PREAMBLE
+    prefix=b'MPUSIQJ\nVersion: 2\nByte-order: little-endian\nN: 77\n--\n'+info.PREAMBLE
     unsigned=dict.fromkeys(info.UNSIGNED,0)
     unsigned.update(bits=7,policy_first_bits=7,policy_last_bits=7,fb_size=1,
                     half_interval=1,q_count=1,poly_d=1,target_relations=1,
@@ -92,8 +94,8 @@ with tempfile.TemporaryDirectory(prefix='event-headers-',dir=RESULTS) as directo
     for labels,primes,y in [(3,[3,3,137],1),(4,[3,3,3,3],2)]:
         unsigned['max_large_primes']=labels;policy=b'codec'
         context=magnitude(77)+struct.pack('<QII',1,21,len(policy))+policy
-        context+=struct.pack('<23Q',*(unsigned[k] for k in info.UNSIGNED))
-        context+=struct.pack('<10d',*([1.0]*10))+struct.pack('<IIII',1,2,1,1)+struct.pack('<3Q',1,2,3)
+        context+=struct.pack('<'+str(len(info.UNSIGNED))+'Q',*(unsigned[k] for k in info.UNSIGNED))
+        context+=struct.pack('<'+str(len(info.DOUBLES))+'d',*([1.0]*len(info.DOUBLES)))+struct.pack('<IIII',1,2,1,1)+struct.pack('<3Q',1,2,3)
         record=bytes((1,labels))+b''.join(v.to_bytes(2,'little') for v in primes)+magnitude(y)+struct.pack('<I',0)
         path=tmp/('synthetic-'+str(labels)+'.journal')
         path.write_bytes(prefix+frame(1,0,1,magnitude(77))+frame(2,1,1,context)+frame(3,2,1,snapshot(partials=1)+record))

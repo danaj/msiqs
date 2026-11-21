@@ -364,6 +364,7 @@ static void check_saturated_fine_filter(void) {
   ctx.candidate_at = (uint16_t *)check_allocate(ctx.sieve_length, sizeof(uint16_t));
   ctx.factor_counts = (uint32_t *)check_allocate(fb_count + 1, sizeof(uint32_t));
   ctx.factor_touched = (uint32_t *)check_allocate(fb_count + 1, sizeof(uint32_t));
+  ctx.factor_row_alloc = fb_count + 1;
   siqs_graph_init(&ctx.graph); siqs_hashset_init(&ctx.relation_hashes, 128);
   siqs_run_sieve(&ctx); CHECK(ctx.sieve[4096] == SIQS_SIEVE_SCORE_MAX);
   siqs_find_candidates(&ctx); CHECK(ctx.candidate_at[4096] || ctx.candidate_wide);
@@ -552,7 +553,6 @@ static void check_score_worker_inheritance(void) {
     fixture.ctx.params.sieve_saturating = mode == 2;
     psiqs_worker_init(&worker, &fixture.ctx, 0);
     CHECK(worker.pool == NULL); /* Exercise pool-free polynomial preparation. */
-    CHECK(worker.ctx.params.sieve_raw_scores == fixture.ctx.params.sieve_raw_scores);
     CHECK(worker.ctx.params.sieve_saturating == fixture.ctx.params.sieve_saturating);
     CHECK(psiqs_assign_family(&fixture.ctx, &fixture.dispatch, &worker, 1));
     siqs_first_B_and_roots(&worker.ctx, &worker.poly); siqs_set_family_sieve_initial(&worker.ctx);

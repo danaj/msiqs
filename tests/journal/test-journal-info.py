@@ -96,7 +96,7 @@ with tempfile.TemporaryDirectory(prefix='journal-info-',dir=RESULTS) as director
  assert 'frame after final job record' in cli(after,ok=False).stderr
  check('failed jobs finish watching; malformed or nonterminal job markers rejected')
  context_frame=next(v for v in ff if v[2][1]==2)
- for frame,offset in ((context_frame,-8),(batches[0],96)):
+ for frame,offset in ((context_frame,-8),(batches[0],info.PROGRESS.index('poly_rng')*8)):
   payload=bytearray(data[frame[0]+info.FRAME.size:frame[1]])
   struct.pack_into('<Q',payload,len(payload)+offset if offset<0 else offset,0)
   bad=tmp/'zero-rng.journal';bad.write_bytes(rewrite(data,frame,payload=payload))
@@ -144,11 +144,12 @@ with tempfile.TemporaryDirectory(prefix='journal-info-',dir=RESULTS) as director
  changed=bytearray(data);changed[batches[0][0]+info.FRAME.size+8]^=1
  bad=tmp/'crc.journal';bad.write_bytes(changed);cli(bad,ok=False)
  payload=bytearray(data[batches[0][0]+info.FRAME.size:batches[0][1]])
- struct.pack_into('<Q',payload,16*8,struct.unpack_from('<Q',payload,16*8)[0]+1)
+ histogram_at=info.PROGRESS.index('length_1')*8
+ struct.pack_into('<Q',payload,histogram_at,struct.unpack_from('<Q',payload,histogram_at)[0]+1)
  bad=tmp/'histogram.journal';bad.write_bytes(rewrite(data,batches[0],payload=payload));cli(bad,ok=False)
  check('bad CRC and inconsistent histogram rejected')
  payload=bytearray(data[batches[0][0]+info.FRAME.size:batches[0][1]])
- width=(result['contexts'][0]['parameters']['large_prime_bound'].bit_length()+7)//8;at=192
+ width=(result['contexts'][0]['parameters']['large_prime_bound'].bit_length()+7)//8;at=8*len(info.PROGRESS)
  while True:
   kind,labels=struct.unpack_from('BB',payload,at);at+=2
   if kind==2:at+=4*labels

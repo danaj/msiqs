@@ -16,11 +16,12 @@
 
       (D*x + B)^2 = D*q(x) (mod N).
 
-  The prime factors of D are included in every relation.  One-large-prime
-  partials use a dedicated anchor table; two-large-prime partials use a
-  general graph (the value 1 is a distinguished graph vertex).  Each repeated
-  1LP label or fundamental graph cycle is turned into a full relation before
-  linear algebra, so the matrix contains factor-base rows only.
+  The prime factors of D are included in every relation.  The dedicated
+  1LP collector pairs relations with a common large prime.  The ordinary
+  2LP and 3LP collectors share a sparse GF(2) combiner that eliminates
+  large-prime parities and produces columns over the factor base and sign
+  row.  It retains the original relations and their provenance for
+  square-root reconstruction.  The 3LP collector has its own cofactor queue.
 
   Copyright (c) 2026 Dana Jacobsen
   Written by Dana Jacobsen, September 2026, with assistance from OpenAI Codex.
@@ -76,6 +77,47 @@ static int siqs_is_prob_prime(const mpz_t n) {
 # define UINT64_C(value) ((uint64_t)(value))
 #endif
 
+/* 3LP selection is based on the post-trial cofactor size. */
+#define SIQS_DEFAULT_TLP_MIN_BITS 361U
+/* Pthread builds can hand residual-first batches to sieve workers. */
+#ifndef SIQS_RESIDUAL_FIRST
+# if defined(PSIQS)
+#  define SIQS_RESIDUAL_FIRST 1
+# else
+#  define SIQS_RESIDUAL_FIRST 0
+# endif
+#endif
+/* An explicit counter choice takes precedence over the build probe. */
+#ifndef SIQS_RF_ATOMICS
+# if defined(SIQS_HAVE_RF_ATOMICS) && SIQS_HAVE_RF_ATOMICS
+#  define SIQS_RF_ATOMICS 1
+# else
+#  define SIQS_RF_ATOMICS 0
+# endif
+#endif
+/* Build the LP prime product up to this fraction of the cube root of R3. */
+#define SIQS_TLP_CUTOFF_NUMERATOR 5U
+#define SIQS_TLP_CUTOFF_DENOMINATOR 8U
+#define SIQS_TLP_PRODUCT_BLOCK_WORDS 262144U
+/* Workers check these publication thresholds at the end of a polynomial. */
+#define SIQS_TLP_WORKER_PUBLISH_POLYNOMIALS 32U
+#define SIQS_TLP_WORKER_RELATION_TARGET 4096U
+/* Direct 3LP batches 32K LP candidates. Residual-first uses 16K slots each
+ * for FB stripping and LP screening. Checks can lower the shared capacity. */
+#ifndef SIQS_TLP_BATCH_SIZE
+# define SIQS_TLP_BATCH_SIZE 32768U
+#endif
+#define SIQS_RF_FB_BATCH_SIZE ((SIQS_TLP_BATCH_SIZE < 16384U) ? SIQS_TLP_BATCH_SIZE : 16384U)
+#define SIQS_RF_LP_BATCH_SIZE ((SIQS_TLP_BATCH_SIZE < 16384U) ? SIQS_TLP_BATCH_SIZE : 16384U)
+#define SIQS_RF_FB_TAIL_BATCH_SIZE 32U
+#define SIQS_RF_LP_TAIL_BATCH_SIZE 4096U
+#if SIQS_TLP_BATCH_SIZE == 0 || SIQS_TLP_BATCH_SIZE > 1048576U || \
+    (SIQS_TLP_BATCH_SIZE & (SIQS_TLP_BATCH_SIZE - 1U)) != 0
+# error "Invalid TLP batch capacity"
+#endif
+
+#include "siqs_batch_gcd_inc.c"
+
 /* Optional POSIX wall-clock instrumentation: build with -DSIQS_TIMING.
  * The size gate applies to reporting and coordinator phases, not splitters.
  * Totals are per factor call; workers accumulate privately and merge only
@@ -94,6 +136,41 @@ static uint64_t siqs_timing_now(void) {
 static uint64_t siqs_timing_elapsed(uint64_t start) {
   return siqs_timing_now() - start;
 }
+static uint64_t siqs_timing_cpu_now(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0)
+    croak("SIQS timing: thread CPU clock failed\n");
+  return (uint64_t)ts.tv_sec * UINT64_C(1000000) + (uint64_t)ts.tv_nsec / 1000U;
+}
+static void siqs_timing_stage(uint64_t *start, uint64_t *total) {
+  if (*start != 0) {
+    uint64_t now = siqs_timing_now();
+    *total += now - *start; *start = now;
+  }
+}
+#define SIQS_PROFILE_FIELDS(X) \
+ X(worker_active_us) X(worker_cpu_us) X(worker_parked_us) X(publications) \
+ X(worker_polynomials) X(poly_sieve_us) X(poly_search_us) X(poly_filter_us) \
+ X(poly_resieve_us) X(poly_evaluate_us) X(poly_clear_us) \
+ X(initial_candidates) X(filtered_candidates) X(evaluated_candidates) X(resieve_hits) \
+ X(collector_cpu_us) X(merge_us) X(ready_wait_us) X(relation_accept_us) X(lp_combine_us) \
+ X(tlp_setup_us) X(tlp_gcd_us) X(tlp_results_us) X(tlp_complete_us) X(tlp_accept_us) \
+ X(tlp_gcd_cpu_us) X(tlp_worker_gcd_cpu_us) X(tlp_worker_gcd_jobs) X(tlp_gcd_wait_us) \
+ X(tlp_prime_us) X(tlp_prime_calls) X(tlp_square_us) X(tlp_square_calls) \
+ X(tlp_ecm_us) X(tlp_ecm_calls) \
+ X(tlp_siqs_us) X(tlp_siqs_calls) X(tlp_siqs_small_calls) \
+ X(tlp_siqs_mid_calls) X(tlp_siqs_wide_calls) \
+ X(rf_setup_us) X(rf_job_us) X(rf_job_cpu_us) X(rf_jobs) \
+ X(rf_screen_us) X(rf_strip_us) X(rf_recover_us) X(rf_inputs) X(rf_accepted) \
+ X(rf_screen_cpu_us) X(rf_wait_us) X(rf_worker_jobs) X(rf_coord_jobs) \
+ X(rf_bulk_cpu_us) X(rf_tail_cpu_us) X(rf_forced_cpu_us) \
+ X(rf_bulk_jobs) X(rf_tail_jobs) X(rf_forced_jobs) \
+ X(rf_lp_bulk_cpu_us) X(rf_lp_tail_cpu_us) X(rf_lp_forced_cpu_us)
+typedef struct {
+#define SIQS_PROFILE_MEMBER(name) uint64_t name;
+  SIQS_PROFILE_FIELDS(SIQS_PROFILE_MEMBER)
+#undef SIQS_PROFILE_MEMBER
+} siqs_profile_t;
 #endif
 
 #ifndef M_LN2
@@ -172,6 +249,163 @@ static uint64_t siqs_timing_elapsed(uint64_t start) {
     (SIQS_SIEVE_BLOCK_SIZE < 4096U || SIQS_SIEVE_BLOCK_SIZE > 1048576U)
 # error "SIQS_SIEVE_BLOCK_SIZE must be zero or between 4 KiB and 1 MiB"
 #endif
+
+
+/******************************************************************************/
+
+/* On-demand deep model: no eager cutoff table and no per-count cache.
+ * Cutoff scoring is recomputed on each query; the reciprocal suffix is still
+ * constructed once during init and shared read-only. Model coefficients,
+ * catalog and tie-breaking are unchanged from the cached reference.
+ *
+ * Frozen, timer-free resieve dispatch model.  This code has no SIQS
+ * context dependency.  Costs come from the five-feature offline calibration
+ * frozen in results-resieve-dispatch-model/frozen-model.json (SHA256
+ * 3062dac64b813bc9203cca03021d8f0e67d7c56a5255e0d236b34efd89010310).
+ * Copyright (c) 2026 Dana Jacobsen.
+ *
+ * init borrows prime[begin..end), which must remain sorted, positive, and
+ * unchanged until clear.  It owns reciprocal_tail and accepts an uninitialized
+ * or cleared model; clear an initialized model before reusing it.  It returns
+ * 1 on success, 0 on invalid input or allocation failure, leaving a failed
+ * model cleared.  clear is also safe on NULL or an already cleared model.
+ *
+ * After init, cutoff is read-only and can be shared by workers.  Its result is
+ * an absolute factor-base index for precisely the initialized range and
+ * geometry; callers handling other ranges must initialize a matching model.
+ * Only the owner calls clear, after the last reader has finished. */
+
+enum { SIQS_RESIEVE_MODEL_FLOOR = 1024,
+       SIQS_RESIEVE_MODEL_METHODS = 9 };
+
+typedef struct siqs_resieve_model {
+  const uint32_t *prime;
+  double *reciprocal_tail;       /* [i] = sum(1/p), p in [begin+i,end);
+                                 * NULL when every catalog cut is end */
+  uint32_t begin, end, span, half_interval;
+  uint32_t barrett_end, one_subtract_end;  /* clipped to [begin,end] */
+} siqs_resieve_model_t;
+
+static uint32_t siqs_resieve_model_cut_for_k(const siqs_resieve_model_t *m,
+                                           uint32_t count, uint32_t k) {
+  uint32_t lo = m->begin, hi = m->end;
+  uint64_t threshold;
+  if (count == 0 || k == UINT32_MAX) return hi;
+  threshold = (uint64_t)k * m->span / count;
+  if (threshold < SIQS_RESIEVE_MODEL_FLOOR)
+    threshold = SIQS_RESIEVE_MODEL_FLOOR;
+  if (threshold > UINT32_MAX) threshold = UINT32_MAX;
+  while (lo < hi) {
+    uint32_t mid = lo + (hi - lo) / 2U;
+    if (m->prime[mid] <= threshold) lo = mid + 1U;
+    else hi = mid;
+  }
+  return lo;
+}
+
+static double siqs_resieve_model_score(const siqs_resieve_model_t *m,
+                                       uint32_t count, uint32_t cut) {
+  uint32_t b = cut < m->barrett_end ? cut : m->barrett_end;
+  uint32_t o = cut < m->one_subtract_end ? cut : m->one_subtract_end;
+  double direct = (double)count * (0.7480900716050534 * (b - m->begin)
+                                  + 0.2833619902945142 * (o - b)
+                                  + 0.0797634926081151 * (cut - o));
+  if (cut == m->end) return direct;
+  return direct + 3.094692211815908 * (m->end - cut)
+                + 0.2903131225661755 * 2.0 * m->span
+                  * m->reciprocal_tail[cut - m->begin];
+}
+
+/* Find the global minimum first, then apply its tolerance.  Updating a running
+ * winner with pairwise tolerances could chain several near-ties and select a
+ * score outside the tolerance of the actual minimum.  Duplicate cuts are
+ * harmless and retain the same score regardless of their catalog labels. */
+static uint32_t siqs_resieve_model_choose(const siqs_resieve_model_t *m,
+                                         uint32_t count) {
+  static const uint32_t ks[SIQS_RESIEVE_MODEL_METHODS] =
+    {0, 1, 2, 4, 8, 16, 32, 64, UINT32_MAX};
+  uint32_t cuts[SIQS_RESIEVE_MODEL_METHODS], best, i;
+  double scores[SIQS_RESIEVE_MODEL_METHODS], minimum, tolerance;
+  if (count == 0 || m->begin == m->end ||
+      m->prime[m->end - 1U] <= SIQS_RESIEVE_MODEL_FLOOR) return m->end;
+  /* A sufficient all-direct bound under this frozen model. Direct costs
+   * decrease across the ordered tiers, so a whole-range average <= walk
+   * setup also bounds every suffix. Round direct up and walk setup down.
+   * C<=64 bounds every uint64 product even for UINT32-sized ranges. */
+  if (count <= 64U) {
+    uint64_t nb = m->barrett_end - m->begin;
+    uint64_t no = m->one_subtract_end - m->barrett_end;
+    uint64_t ni = m->end - m->one_subtract_end;
+    uint64_t direct = (uint64_t)count *
+        (UINT64_C(749) * nb + UINT64_C(284) * no + UINT64_C(80) * ni);
+    if (direct <= UINT64_C(3094) * (m->end - m->begin)) return m->end;
+  }
+  for (i = 0; i < SIQS_RESIEVE_MODEL_METHODS; ++i) {
+    cuts[i] = siqs_resieve_model_cut_for_k(m, count, ks[i]);
+    scores[i] = siqs_resieve_model_score(m, count, cuts[i]);
+  }
+  minimum = scores[0];
+  for (i = 1; i < SIQS_RESIEVE_MODEL_METHODS; ++i)
+    if (scores[i] < minimum) minimum = scores[i];
+  /* Every score is nonnegative, so abs(minimum) == minimum. */
+  tolerance = minimum * 1e-12;
+  if (tolerance < 1e-12) tolerance = 1e-12;
+  best = m->begin;
+  for (i = 0; i < SIQS_RESIEVE_MODEL_METHODS; ++i)
+    if (scores[i] <= minimum + tolerance && cuts[i] > best) best = cuts[i];
+  return best;
+}
+
+static void siqs_resieve_model_clear(siqs_resieve_model_t *m) {
+  if (m == NULL) return;
+  free(m->reciprocal_tail);
+  memset(m, 0, sizeof(*m));
+}
+
+static int siqs_resieve_model_init(siqs_resieve_model_t *m,
+                                  const uint32_t *prime,
+                                  uint32_t begin, uint32_t end,
+                                  uint32_t span, uint32_t half_interval) {
+  uint32_t i, count;
+  uint64_t slots;
+  if (m == NULL) return 0;
+  memset(m, 0, sizeof(*m));
+  if (begin > end || span == 0 || half_interval >= span ||
+      (begin != end && prime == NULL)) return 0;
+  for (i = begin; i < end; ++i)
+    if (prime[i] == 0 || (i != begin && prime[i] < prime[i - 1U])) return 0;
+  count = end - begin;
+  if (count != 0 && prime[end - 1U] > SIQS_RESIEVE_MODEL_FLOOR) {
+    slots = (uint64_t)count + 1U;
+    if (slots > SIZE_MAX / sizeof(*m->reciprocal_tail)) return 0;
+    m->reciprocal_tail = (double *)malloc((size_t)slots
+                                         * sizeof(*m->reciprocal_tail));
+    if (m->reciprocal_tail == NULL) return 0;
+    m->reciprocal_tail[count] = 0.0;
+    for (i = count; i != 0; --i)
+      m->reciprocal_tail[i - 1U] = m->reciprocal_tail[i]
+                                  + 1.0 / prime[begin + i - 1U];
+  }
+  m->prime = prime;
+  m->begin = begin; m->end = end;
+  m->span = span; m->half_interval = half_interval;
+  m->barrett_end = begin;
+  while (m->barrett_end < end && prime[m->barrett_end] <= half_interval)
+    ++m->barrett_end;
+  m->one_subtract_end = m->barrett_end;
+  while (m->one_subtract_end < end && prime[m->one_subtract_end] < span)
+    ++m->one_subtract_end;
+  return 1;
+}
+
+static uint32_t siqs_resieve_model_cutoff(const siqs_resieve_model_t *m,
+                                         uint32_t count) {
+  return siqs_resieve_model_choose(m, count);
+}
+
+/******************************************************************************/
+
+
 #define SIQS_MATRIX_EXTRA_RELS(ctx) \
     ((ctx)->params.max_large_primes == 1 \
       ? SIQS_MATRIX_EXTRA_RELS_1LP_DEFAULT \
@@ -337,6 +571,11 @@ typedef struct {
   siqs_policy_curve_t sieve_hit_exponent;
   double sieve_start_index_exponent;
   uint32_t half_interval_floor;  /* derived intervals; zero uses 4096 */
+  /* Zero selects the default scale of 1. Scale FB and K_L before rounding
+   * the derived sizes/bounds, and scale R2 after resolving its base bound. */
+  double fb_scale;
+  double lp_scale;
+  double r2_scale;
 } siqs_policy_band_t;
 
 typedef struct {
@@ -356,6 +595,9 @@ typedef struct {
   double fb_coefficient;
   double interval_scale;
   double sieve_hit_exponent;
+  double fb_scale;
+  double lp_scale;
+  double r2_scale;
 } siqs_policy_t;
 
 /* LINEAR permits extrapolation from its origin.  RAMP stores exact endpoints
@@ -428,7 +670,7 @@ static const siqs_policy_band_t siqs_policy_bands[] = {
     SIQS_POLICY_LINEAR(0.690, 0.0136, 16),
     SIQS_POLICY_LINEAR(0.0, 0.0, 1),
     SIQS_POLICY_RATIO(0.0, 0, 0, 0),
-    SIQS_POLICY_LINEAR(0.15, 0.0, 65), 0.0, 0 },
+    SIQS_POLICY_LINEAR(0.15, 0.0, 65), 0.0, 0, 0, 0, 0 },
   /* Small q=1 inputs: nearest eligible prime, one backup, then recovery. */
   { "smooth_k1_q1_geometry_ramp", 21, 30, 1, 1, 8, 0, 0,
     SIQS_POLICY_LINEAR(1.0, 0.0, 21), SIQS_R_DERIVED_FROM_LP,
@@ -436,7 +678,7 @@ static const siqs_policy_band_t siqs_policy_bands[] = {
     SIQS_POLICY_LINEAR(0.3918, (0.3720 - 0.3918) / 9.0, 22),
     SIQS_POLICY_LINEAR(0.0, 0.166 / 9.0, 22),
     SIQS_POLICY_RATIO(0.0, 0, 0, 0),
-    SIQS_POLICY_LINEAR(0.15, 0.0, 65), 0.0, 256 },
+    SIQS_POLICY_LINEAR(0.15, 0.0, 65), 0.0, 256, 0, 0, 0 },
   /* Preserve the interior FB counts while joining the tuned endpoints.
    * The interval floor holds M at 1792 through 48 bits, then 2048. */
   { "smooth_k1_q2_geometry_ramp", 31, 50, 1, 2, 0, 3, 30,
@@ -445,14 +687,14 @@ static const siqs_policy_band_t siqs_policy_bands[] = {
     SIQS_POLICY_RAMP(0.3310, 0.3053, 31, 50),
     SIQS_POLICY_RAMP(0.0, 0.3095, 31, 50),
     SIQS_POLICY_RATIO(0.0, 0, 0, 0),
-    SIQS_POLICY_LINEAR(0.15, 0.0, 65), 0.0, 1792 },
+    SIQS_POLICY_LINEAR(0.15, 0.0, 65), 0.0, 1792, 0, 0, 0 },
   { "smooth_k1_q3_geometry_ramp", 51, 73, 1, 3, 0, 3, 50,
     SIQS_POLICY_LINEAR(1.0, 0.0, 50), SIQS_R_DERIVED_FROM_LP,
     8, 0, 32, 4, 8, 0,
     SIQS_POLICY_RAMP(0.306, 0.3075, 50, 73),
     SIQS_POLICY_RAMP(0, 0.96, 50, 73),
     SIQS_POLICY_RATIO(0.0, 0, 0, 0),
-    SIQS_POLICY_LINEAR(0.15, 0.0, 65), 0.0, 0 },
+    SIQS_POLICY_LINEAR(0.15, 0.0, 65), 0.0, 0, 0, 0, 0 },
   /* The low-end FB fit joins the established q4 curve at 81 bits.
    * A single 74-95 fit regressed around 86-87 bits. */
   { "smooth_k1_q4_low_transition", 74, 80, 1, 4, 6, 0, 0,
@@ -461,35 +703,35 @@ static const siqs_policy_band_t siqs_policy_bands[] = {
     SIQS_POLICY_RAMP(0.3033, 0.3104, 74, 80),
     SIQS_POLICY_LINEAR(0.78, 0.03, 81),
     SIQS_POLICY_RATIO(0.0, 0, 0, 0),
-    SIQS_POLICY_LINEAR(0.15, 0.0, 65), 0.0, 0 },
+    SIQS_POLICY_LINEAR(0.15, 0.0, 65), 0.0, 0, 0, 0, 0 },
   { "smooth_k1_q4_fb_low", 81, 95, 1, 4, 6, 0, 0,
     SIQS_POLICY_LINEAR(1.0, 0.0, 81), SIQS_R_DERIVED_FROM_LP,
     8, 0, 48, 4, 8, 0,
     SIQS_POLICY_LINEAR(0.311589139, 0.0000229912, 81),
     SIQS_POLICY_LINEAR(0.78, 0.03, 81),
     SIQS_POLICY_RATIO(0.0, 0, 0, 0),
-    SIQS_POLICY_LINEAR(0.15, 0.0, 65), 0.0, 0 },
+    SIQS_POLICY_LINEAR(0.15, 0.0, 65), 0.0, 0, 0, 0, 0 },
   { "one_lp_k2_q5_geometry_ramp", 96, 103, 1, 5, 10, 3, 96,
     SIQS_POLICY_LINEAR(2.0, 0.0, 96), SIQS_R_DERIVED_FROM_LP,
     8, 0, 160, 2, 6, 0,
     SIQS_POLICY_LINEAR(0.308695990712, -0.000554318961222, 96),
     SIQS_POLICY_LINEAR(1.649, 0.03, 96),
     SIQS_POLICY_RATIO(0.0, 0, 0, 0),
-    SIQS_POLICY_LINEAR(0.15, 0.0, 100), 0.45, 0 },
+    SIQS_POLICY_LINEAR(0.15, 0.0, 100), 0.45, 0, 0, 0, 0 },
   { "one_lp_k4_q6_geometry_ramp", 104, 113, 1, 6, 14, 4, 104,
     SIQS_POLICY_LINEAR(4.0, 0.0, 104), SIQS_R_DERIVED_FROM_LP,
     8, 0, 160, 0, 6, 0,
     SIQS_POLICY_RAMP(0.3012, 0.2919, 104, 113),
     SIQS_POLICY_RAMP(0.3651, 0.7465, 104, 113),
     SIQS_POLICY_RATIO(0.0, 0, 0, 0),
-    SIQS_POLICY_LINEAR(0.15, 0.0, 117), 0.45, 0 },
+    SIQS_POLICY_LINEAR(0.15, 0.0, 117), 0.45, 0, 0, 0, 0 },
   { "one_lp_k4_q7_interval_ramp", 114, 144, 1, 7, 14, 0, 0,
     SIQS_POLICY_LINEAR(4.0, 0.0, 114), SIQS_R_DERIVED_FROM_LP,
     8, 0, 160, 0, 6, 0,
     SIQS_POLICY_LINEAR(0.309768359, 0.0003559297, 130),
     SIQS_POLICY_LINEAR(0.927, 0.042, 134),
     SIQS_POLICY_RATIO(0.0, 0, 0, 0),
-    SIQS_POLICY_LINEAR(0.15, 0.0, 140), 0.45, 0 },
+    SIQS_POLICY_LINEAR(0.15, 0.0, 140), 0.45, 0, 0, 0, 0 },
   /* Multiplier selection widens at 167 bits within this band; see
    * siqs_multiplier_policy(). Its FB-based cascade-depth clamps can
    * introduce other crossovers when these curves are retuned. */
@@ -499,7 +741,7 @@ static const siqs_policy_band_t siqs_policy_bands[] = {
     SIQS_POLICY_RAMP(0.314977, 0.325764, 145, 184),
     SIQS_POLICY_RAMP(0.8115, 1.3674, 145, 184),
     SIQS_POLICY_RATIO(0.0, 0, 0, 0),
-    SIQS_POLICY_LINEAR(0.15, 0.0003, 150), 0.45, 0 },
+    SIQS_POLICY_LINEAR(0.15, 0.0003, 150), 0.45, 0, 0, 0, 0 },
   /* Keep FB small enough to use BIDS through 197 bits.  Use 401 prime floor
    * to skip dense sieve progressions.  FB/M tuned for small solver. */
   { "one_lp_q9_bids_ramp", 185, 197, 1, 9, 18, 0, 0,
@@ -509,7 +751,7 @@ static const siqs_policy_band_t siqs_policy_bands[] = {
     SIQS_POLICY_RAMP(0.32116576, 0.32101272, 185, 197),
     SIQS_POLICY_RAMP(0.879870, 1.280239, 185, 197),
     SIQS_POLICY_RATIO(0.0, 0, 0, 0),
-    SIQS_POLICY_LINEAR(0.15, 0.0003, 150), 0.0, 0 },
+    SIQS_POLICY_LINEAR(0.15, 0.0003, 150), 0.0, 0, 0, 0, 0 },
   /* Above BIDS crossover, tune for matrix solver.
    * Use FB^0.45 index cutoff to skip more dense progressions as FB grows. */
   { "one_lp_q9_upper_ramp", 198, 218, 1, 9, 18, 0, 0,
@@ -519,14 +761,14 @@ static const siqs_policy_band_t siqs_policy_bands[] = {
     SIQS_POLICY_RAMP(0.32514610, 0.33388661, 198, 218),
     SIQS_POLICY_RAMP(1.287917, 1.541635, 198, 218),
     SIQS_POLICY_RATIO(0.0, 0, 0, 0),
-    SIQS_POLICY_LINEAR(0.15, 0.0003, 150), 0.45, 0 },
+    SIQS_POLICY_LINEAR(0.15, 0.0003, 150), 0.45, 0, 0, 0, 0 },
   { "one_lp_k48_q10_geometry_ramp", 219, 236, 1, 10, 18, 0, 0,
     SIQS_POLICY_LINEAR(48.0, 0.0, 219), SIQS_R_DERIVED_FROM_LP,
     8, 401, 160, 96, 0, 0,
     SIQS_POLICY_LINEAR(0.331, 0.0, 219),
     SIQS_POLICY_LINEAR(1.17545454545, 0.0, 219),
     SIQS_POLICY_RATIO(0.0, 0, 0, 0),
-    SIQS_POLICY_LINEAR(0.15, 0.0003, 150), 0.0, 0 },
+    SIQS_POLICY_LINEAR(0.15, 0.0003, 150), 0.0, 0, 0, 0, 0 },
   /* Geometry stays anchored at 232, independently of the 237-bit start. */
   { "one_lp_k72_q10_fb_taper", 237, 245, 1, 10, 18, 0, 0,
     SIQS_POLICY_LINEAR(72.0, 0.0, 237), SIQS_R_DERIVED_FROM_LP,
@@ -534,7 +776,7 @@ static const siqs_policy_band_t siqs_policy_bands[] = {
     SIQS_POLICY_LINEAR(0.340488506709531, -0.001055481282083, 232),
     SIQS_POLICY_LINEAR(1.238537142850445, -0.036017142857150, 232),
     SIQS_POLICY_RATIO(0.0, 0, 0, 0),
-    SIQS_POLICY_LINEAR(0.15, 0.0003, 150), 0.0, 0 },
+    SIQS_POLICY_LINEAR(0.15, 0.0003, 150), 0.0, 0, 0, 0, 0 },
   /* The base interval includes the LP adjustment; leave its ratio at zero. */
   { "two_lp_q11_geometry_ramp", 246, 269, 2, 11, 18, 0, 0,
     SIQS_POLICY_LINEAR(112.0, 0.0, 246), SIQS_POLICY_LINEAR(168.0, 0.0, 246),
@@ -542,14 +784,14 @@ static const siqs_policy_band_t siqs_policy_bands[] = {
     SIQS_POLICY_LINEAR(0.3007, 0.0001343, 246),
     SIQS_POLICY_LINEAR(0.53913, -0.0028915, 246),
     SIQS_POLICY_RATIO(0.0, 0, 0, 0),
-    SIQS_POLICY_LINEAR(0.205, 0.000015217391304347357, 246), 0.0, 0 },
+    SIQS_POLICY_LINEAR(0.205, 0.000015217391304347357, 246), 0.0, 0, 0, 0, 0 },
   { "two_lp_mid_fb_release", 270, 299, 2, 11, 12, 0, 0,
     SIQS_POLICY_RAMP(112.0, 166.0, 270, 299), SIQS_POLICY_RAMP(168.0, 250.0, 270, 299),
     8, 401, 160, 96, 0, 0,
     SIQS_POLICY_LINEAR(0.30563, 0.000087, 270),
     SIQS_POLICY_LINEAR(0.45, -0.0064759, 270),
     SIQS_POLICY_RATIO(0.15231778066, 0, 1, 30),
-    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0 },
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0, 0, 0 },
   /* Start q=12 early for safety: difficult 300/310-bit cases consumed less
    * of the polynomial budget than with q=11. */
   { "two_lp_q12_safety_bridge", 300, 310, 2, 12, 12, 0, 0,
@@ -558,7 +800,7 @@ static const siqs_policy_band_t siqs_policy_bands[] = {
     SIQS_POLICY_LINEAR(0.30947805274395174, 0.00017299534431592934, 300),
     SIQS_POLICY_LINEAR(0.25, 0.0, 305),
     SIQS_POLICY_RATIO(0.15231778066, 50, -1, 50),
-    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0 },
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0, 0, 0 },
   { "two_lp_high_q12_interval_rise", 311, 330, 2, 12, 12, 0, 0,
     SIQS_POLICY_RAMP(248.0, 280.0, 311, 330), SIQS_R_DERIVED_FROM_LP,
     16, 384, 160, 96, 0, 0,
@@ -566,7 +808,7 @@ static const siqs_policy_band_t siqs_policy_bands[] = {
     SIQS_POLICY_RAMP(0.31138, 0.31466, 311, 331),
     SIQS_POLICY_RAMP(0.25, 0.44, 311, 331),
     SIQS_POLICY_RATIO(0.15231778066, 39, -1, 50),
-    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0 },
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0, 0, 0 },
   { "two_lp_high_q12_interval_bridge", 331, 360,
     2, 12, 12, 0, 0,
     SIQS_POLICY_RAMP(280.0, 384.0, 331, 400),                /* K_L     */
@@ -575,7 +817,7 @@ static const siqs_policy_band_t siqs_policy_bands[] = {
     SIQS_POLICY_LINEAR(0.31466, 0.00020, 331),               /* FB      */
     SIQS_POLICY_RAMP(0.44, 0.5071, 331, 360),                /* M       */
     SIQS_POLICY_RATIO(0.15231778066, 19, -1, 50),            /* M ratio */
-    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0 },         /* sieve-e */
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0, 0, 0 }, /* sieve-e */
   /* Shorter M screened at 380/400 bits. */
   { "two_lp_high_q12_interval_finish", 361, 400,
     2, 12, 12, 0, 0,
@@ -585,7 +827,7 @@ static const siqs_policy_band_t siqs_policy_bands[] = {
     SIQS_POLICY_LINEAR(0.31322, 0.000202, 331),              /* FB      */
     SIQS_POLICY_RAMP(0.5046, 0.4063, 361, 400),              /* M       */
     SIQS_POLICY_RATIO(0.15231778066, -11, -1, 50),           /* M ratio */
-    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0 },         /* sieve-e */
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0, 0, 0 }, /* sieve-e */
   /* Slower FB growth, M from 400/410/420/430 screening. */
   { "two_lp_q12_high_level", 401, 430,
     2, 12, 12, 0, 0,
@@ -595,7 +837,7 @@ static const siqs_policy_band_t siqs_policy_bands[] = {
     SIQS_POLICY_LINEAR(0.32670, -0.000248, 401),             /* FB */
     SIQS_POLICY_RAMP(0.4038, 0.3040, 401, 430),              /* M */
     SIQS_POLICY_RATIO(0.15231778066, -51, -1, 50),           /* M ratio */
-    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0 },         /* sieve-e */
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0, 0, 0 }, /* sieve-e */
   /* Untuned q13 continuation: retain 40% of the previous M curve. */
   { "two_lp_q13_vhigh", 431, 512,
     2, 13, 12, 0, 0,
@@ -605,7 +847,87 @@ static const siqs_policy_band_t siqs_policy_bands[] = {
     SIQS_POLICY_LINEAR(0.31926, -0.000248, 431),             /* FB */
     SIQS_POLICY_RAMP(0.3032, 0.2384, 431, 512),              /* M */
     SIQS_POLICY_RATIO(0.15231778066, -81, -1, 50),           /* M ratio */
-    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0 }          /* sieve-e */
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0, 0, 0 }          /* sieve-e */
+};
+
+
+/* Separate 3LP policies, selected by default from 361 bits or by --3lp.
+ * This table may leave gaps: use ordinary policies wherever no row matches.
+ * Keep the ordinary table above independent for --2lp and smaller inputs. */
+static const siqs_policy_band_t siqs_tlp_policy_bands[] = {
+  /* 3LP is slower down at these sizes, but we leave them supported for
+   * testing.  Somewhere in the 100 to 120 digit range is where it should
+   * start paying off. */
+  { "3lp_mid_fb_release", 270, 299, 3, 11, 12, 0, 0,
+    SIQS_POLICY_RAMP(112.0, 166.0, 270, 299), SIQS_POLICY_RAMP(168.0, 250.0, 270, 299),
+    8, 401, 160, 96, 0, 0,
+    SIQS_POLICY_LINEAR(0.30563, 0.000087, 270),
+    SIQS_POLICY_LINEAR(0.45, -0.0064759, 270),
+    SIQS_POLICY_RATIO(0.15231778066, 0, 1, 30),
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0, 0, 0 },
+  /* Start q=12 early for safety: difficult 300/310-bit cases consumed less
+   * of the polynomial budget than with q=11. */
+  { "3lp_q12_safety_bridge", 300, 310, 3, 12, 12, 0, 0,
+    SIQS_POLICY_RAMP(208.0, 248.0, 300, 310), SIQS_R_DERIVED_FROM_LP,
+    16, 384, 160, 96, 0, 0,
+    SIQS_POLICY_LINEAR(0.30947805274395174, 0.00017299534431592934, 300),
+    SIQS_POLICY_LINEAR(0.25, 0.0, 305),
+    SIQS_POLICY_RATIO(0.15231778066, 50, -1, 50),
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0, 0, 0 },
+  { "3lp_high_q12_interval_rise", 311, 330, 3, 12, 12, 0, 0,
+    SIQS_POLICY_RAMP(248.0, 280.0, 311, 330), SIQS_R_DERIVED_FROM_LP,
+    16, 384, 160, 96, 0, 0,
+    /* Geometry meets the next band's 331-bit setup. */
+    SIQS_POLICY_RAMP(0.31138, 0.31466, 311, 331),
+    SIQS_POLICY_RAMP(0.25, 0.44, 311, 331),
+    SIQS_POLICY_RATIO(0.15231778066, 39, -1, 50),
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0,
+    .fb_scale = 0.85,
+    .lp_scale = 0.75,
+    .r2_scale = 4.0 },
+  { "3lp_high_q12_interval_bridge", 331, 360,
+    3, 12, 12, 0, 0,
+    SIQS_POLICY_RAMP(280.0, 384.0, 331, 400),                /* K_L     */
+    SIQS_POLICY_RAMP(280.0, 768.0, 331, 400),                /* K_R     */
+    16, 384, 160, 96, 0, 0,
+    SIQS_POLICY_LINEAR(0.31466, 0.00020, 331),               /* FB      */
+    SIQS_POLICY_RAMP(0.44, 0.5071, 331, 360),                /* M       */
+    SIQS_POLICY_RATIO(0.15231778066, 19, -1, 50),            /* M ratio */
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0,           /* sieve-e */
+    /* Measured on two 350-bit full factorizations. */
+    .fb_scale = 0.85,
+    .lp_scale = 0.75,
+    .r2_scale = 4.0 },
+  /* Shorter M screened at 380/400 bits. */
+  { "3lp_high_q12_interval_finish", 361, 400,
+    3, 12, 12, 0, 0,
+    SIQS_POLICY_RAMP(280.0, 384.0, 331, 400),                /* K_L     */
+    SIQS_POLICY_RAMP(280.0, 768.0, 331, 400),                /* K_R     */
+    16, 384, 160, 96, 0, 0,
+    SIQS_POLICY_LINEAR(0.31322, 0.000202, 331),              /* FB      */
+    SIQS_POLICY_RAMP(0.5046, 0.4063, 361, 400),              /* M       */
+    SIQS_POLICY_RATIO(0.15231778066, -11, -1, 50),           /* M ratio */
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0, 0, 0 }, /* sieve-e */
+  /* Slower FB growth, M from 400/410/420/430 screening. */
+  { "3lp_q12_high_level", 401, 430,
+    3, 12, 12, 0, 0,
+    SIQS_POLICY_RAMP(384.0, 416.0, 401, 430),                /* K_L     */
+    SIQS_POLICY_RAMP(768.0, 1024.0, 401, 430),               /* K_R     */
+    16, 384, 160, 96, 0, 0,
+    SIQS_POLICY_LINEAR(0.32670, -0.000248, 401),             /* FB */
+    SIQS_POLICY_RAMP(0.4038, 0.3040, 401, 430),              /* M */
+    SIQS_POLICY_RATIO(0.15231778066, -51, -1, 50),           /* M ratio */
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0, 0, 0 }, /* sieve-e */
+  /* Untuned q13 continuation: retain 40% of the previous M curve. */
+  { "3lp_q13_vhigh", 431, 512,
+    3, 13, 12, 0, 0,
+    SIQS_POLICY_RAMP(416.0, 512.0, 431, 512),                /* K_L     */
+    SIQS_POLICY_RAMP(1024.0, 1536.0, 431, 512),              /* K_R     */
+    16, 384, 160, 96, 0, 0,
+    SIQS_POLICY_LINEAR(0.31926, -0.000248, 431),             /* FB */
+    SIQS_POLICY_RAMP(0.3032, 0.2384, 431, 512),              /* M */
+    SIQS_POLICY_RATIO(0.15231778066, -81, -1, 50),           /* M ratio */
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0, 0, 0 }          /* sieve-e */
 };
 
 /* Retry low q=1/q=2 failures with q=1 at 8K and 16K.
@@ -617,7 +939,7 @@ static const siqs_policy_band_t siqs_policy_bands[] = {
     SIQS_POLICY_LINEAR(0.315, 0.0, 65), \
     SIQS_POLICY_LINEAR(0.0, 0.0, 1), \
     SIQS_POLICY_RATIO(0.0, 0, 0, 0), \
-    SIQS_POLICY_LINEAR(0.15, 0.0, 65), 0.0, 0 }
+    SIQS_POLICY_LINEAR(0.15, 0.0, 65), 0.0, 0, 0, 0, 0 }
 
 static const siqs_policy_band_t siqs_recovery_policies[] = {
   SIQS_LOW_SMOOTH_RECOVERY_POLICY(
@@ -633,7 +955,7 @@ static const siqs_policy_band_t siqs_recovery_policies[] = {
     SIQS_POLICY_LINEAR(0.315, 0.0, 42),
     SIQS_POLICY_LINEAR(0.0, 0.0, 1),
     SIQS_POLICY_RATIO(0.0, 0, 0, 0),
-    SIQS_POLICY_LINEAR(0.15, 0.0, 42), 0.0, 0 },
+    SIQS_POLICY_LINEAR(0.15, 0.0, 42), 0.0, 0, 0, 0, 0 },
   /* Rare smooth-only q=3 exhaustion can leave only trivial dependencies
    * (e.g. 39586268787172817).  Retain the recovery FB/interval geometry, but
    * admit one-LP partials to obtain new relations after that policy fails. */
@@ -643,7 +965,7 @@ static const siqs_policy_band_t siqs_recovery_policies[] = {
     SIQS_POLICY_LINEAR(0.315, 0.0, 65),
     SIQS_POLICY_LINEAR(0.0, 0.041666666666666667, 50),
     SIQS_POLICY_RATIO(0.0, 0, 0, 0),
-    SIQS_POLICY_LINEAR(0.15, 0.0, 65), 0.0, 0 },
+    SIQS_POLICY_LINEAR(0.15, 0.0, 65), 0.0, 0, 0, 0, 0 },
   /* K60 cannot create missing q=3 A products.  After q=3 attempts
    * fail, use pair families with the same low-band FB/interval geometry.
    * Larger 65--80-bit targets need not fit a pair, so keep this local. */
@@ -653,7 +975,7 @@ static const siqs_policy_band_t siqs_recovery_policies[] = {
     SIQS_POLICY_LINEAR(0.315, 0.0, 65),
     SIQS_POLICY_LINEAR(0.0, 0.041666666666666667, 50),
     SIQS_POLICY_RATIO(0.0, 0, 0, 0),
-    SIQS_POLICY_LINEAR(0.15, 0.0, 65), 0.0, 0 }
+    SIQS_POLICY_LINEAR(0.15, 0.0, 65), 0.0, 0, 0, 0, 0 }
 };
 #undef SIQS_LOW_SMOOTH_RECOVERY_POLICY
 
@@ -664,6 +986,9 @@ static const siqs_policy_band_t siqs_recovery_policies[] = {
 
 #define SIQS_POLICY_BAND_COUNT \
   ((uint32_t)(sizeof(siqs_policy_bands) / sizeof(siqs_policy_bands[0])))
+
+#define SIQS_TLP_POLICY_BAND_COUNT \
+  ((uint32_t)(sizeof(siqs_tlp_policy_bands) / sizeof(siqs_tlp_policy_bands[0])))
 
 #define SIQS_RECOVERY_POLICY_COUNT \
   ((uint32_t)(sizeof(siqs_recovery_policies) / \
@@ -694,12 +1019,20 @@ typedef struct {
   uint32_t factor_alloc;
 } siqs_eval_workspace_t;
 
+#if SIQS_RESIDUAL_FIRST
+typedef struct { mpz_t norm, distinct; } siqs_rf_norm_t;
+#endif
+
 typedef struct {
   mpz_t y;
   siqs_raw_factors_t factors;
   uint32_t nfactors;
   uint64_t lp1;
   uint64_t lp2;
+  uint64_t lp3; /* 1 for legacy records; 0 marks a queued 3LP cofactor. */
+#if SIQS_RESIDUAL_FIRST
+  siqs_rf_norm_t *rf_norm; /* Non-NULL only in a private norm packet. */
+#endif
 } siqs_raw_relation_t;
 
 typedef struct siqs_raw_block_t {
@@ -748,6 +1081,7 @@ typedef struct {
   uint64_t primality_time; /* Cofactor pretest microseconds, summed over workers. */
   uint64_t primality_prime, primality_composite; /* Pretest answers. */
   uint64_t matrix_time, solver_time, dependency_time; /* Coordinator wall time. */
+  siqs_profile_t profile;
 #endif
 } siqs_factor_array_t;
 
@@ -782,7 +1116,9 @@ typedef struct {
   uint8_t sieve_saturating;     /* score certificate requires saturation */
   uint16_t sieve_score_bound;  /* cheap raw-score upper bound; 0 if unknown */
   uint64_t large_prime_bound;
-  uint64_t smooth_bound;
+  uint64_t smooth_bound; /* Existing 1LP/2LP bound; resolver stays unchanged. */
+  uint32_t tlp_cutoff;
+  double tlp_smooth_bound;
   double fb_coefficient;
   double interval_scale;
   double sieve_hit_exponent;
@@ -790,7 +1126,14 @@ typedef struct {
   double sieve_hit_residual_multiplier;
   double sieve_hit_bound;
   double log_scale;
+  double fb_scale, lp_scale, r2_scale;
 } siqs_parameters_t;
+
+/* Built once per mode-3 context and borrowed read-only by its sieve workers.
+ * All integer bounds remain exact even when L^2 or Q^3 exceeds uint64_t. */
+typedef struct {
+  mpz_t prime_limit, triple_min, gap_lower;
+} siqs_tlp_policy_t;
 
 typedef struct {
   uint64_t state;
@@ -896,6 +1239,13 @@ typedef struct {
   uint32_t original[64];
 } siqs_bids_word_t;
 
+typedef struct {
+  uint64_t full, smooth, one_lp, two_lp, three_lp, polynomials, pending;
+} siqs_progress_snapshot_t;
+
+#ifdef PSIQS
+struct siqs_tlp_gcd_job;
+#endif
 
 typedef struct {
   mpz_srcptr original_n;
@@ -916,6 +1266,8 @@ typedef struct {
   uint32_t *fb_reciprocal;
   uint32_t resieve_one_subtract_index;
   uint32_t resieve_identity_index;
+  /* Immutable job geometry and cutoff cache, borrowed with the FB tables. */
+  siqs_resieve_model_t *resieve_model;
   uint32_t largest_fb_prime;
   uint8_t *sieve;
   uint32_t sieve_length;
@@ -944,10 +1296,22 @@ typedef struct {
   uint32_t matrix_target_limit;
   uint32_t *matrix_ready_incidence;
   size_t matrix_ready_incidence_alloc;
+  struct siqs_lp_combiner *lp_combiner; /* Shared LP-only basis and cycle history. */
   int inline_matrix_solves;
   siqs_graph_t graph;
+  struct siqs_tlp_state *tlp;
+#if SIQS_RESIDUAL_FIRST
+  struct siqs_rf_pool *rf;
+  int residual_first;
+#endif
+#ifdef PSIQS
+  int (*tlp_submit_gcd)(void *, struct siqs_tlp_gcd_job *);
+  void *tlp_submit_data;
+#endif
+  siqs_raw_arena_t tlp_pending_arena;
+  mpz_t tlp_upper;
+  siqs_tlp_policy_t *tlp_policy;
   siqs_one_lp_state_t one_lp;
-  struct siqs_lp_combiner *lp_combiner;
   siqs_hashset_t relation_hashes;
   siqs_hashset_t a_hashes;
   siqs_factor_array_t *result;
@@ -963,6 +1327,13 @@ typedef struct {
   uint64_t accepted_smooth;
   uint64_t accepted_one_lp;
   uint64_t accepted_two_lp;
+  uint64_t accepted_three_lp;
+  siqs_progress_snapshot_t progress_last;
+  uint64_t tlp_candidates, tlp_batches, tlp_gcd_one, tlp_gcd_proper, tlp_gcd_whole;
+  uint64_t tlp_completed, tlp_rejected;
+  /* These diagnostics count newly processed work, excluding journal replay. */
+  uint64_t tlp_r2_attempts, tlp_r2_resolved, tlp_r2_rejected, tlp_r2_fallback;
+  uint64_t tlp_gap_rejected;
   /* One terminal bucket per attempted composite; method counts are accepted
    * prime pairs, not all successful splits or calls to that method. */
   uint64_t split_attempts;
@@ -991,18 +1362,30 @@ typedef struct {
   uint64_t journal_cycles[8];
 } siqs_ctx_t;
 
+static void siqs_tlp_flush(siqs_ctx_t *);
+static void siqs_archive_lp_relation(siqs_ctx_t *, siqs_raw_relation_t *);
+#if SIQS_RESIDUAL_FIRST
+static void siqs_rf_capture(siqs_ctx_t *, const siqs_poly_t *, int32_t,
+    const mpz_t, int, const uint32_t *, const uint32_t *, uint32_t);
+static void siqs_rf_queue(siqs_ctx_t *, siqs_raw_relation_t *);
+static void siqs_rf_poll(siqs_ctx_t *);
+static void siqs_rf_flush(siqs_ctx_t *);
+static void siqs_rf_maybe_submit(siqs_ctx_t *);
+static size_t siqs_rf_pending(const siqs_ctx_t *);
+static void siqs_ctx_clear(siqs_ctx_t *);
+#endif
+
+static uint32_t siqs_matrix_rows(const siqs_ctx_t *);
+static uint64_t siqs_matrix_prime(const siqs_ctx_t *, uint32_t);
 static void siqs_journal_relation(siqs_ctx_t *, const siqs_raw_relation_t *);
 static void siqs_journal_family(siqs_ctx_t *, const siqs_poly_t *);
 static void sj_flush(siqs_ctx_t *);
 static void sj_maybe_flush(siqs_ctx_t *);
 static void siqs_journal_full(siqs_ctx_t *, uint32_t);
 
-static mpz_t *siqs_factor(const mpz_t n, uint32_t *nfactors,
-                           uint32_t trial_start, int verbose,
-                           uint32_t nthreads);
-
 static int siqs_bids_enabled(const siqs_ctx_t *ctx) {
-  return ctx->params.fb_size <= SIQS_BIDS_MAX_FB && !ctx->buffer_relations;
+  return ctx->params.max_large_primes != 3 &&
+         ctx->params.fb_size <= SIQS_BIDS_MAX_FB && !ctx->buffer_relations;
 }
 static void siqs_bids_add(siqs_ctx_t *ctx);
 static void siqs_bids_note_progress(siqs_ctx_t *ctx);
@@ -1336,6 +1719,7 @@ static void siqs_factor_array_init(siqs_factor_array_t *fa, const mpz_t n) {
   fa->cofactor_time = fa->cofactor_calls = 0;
   fa->primality_time = fa->primality_prime = fa->primality_composite = 0;
   fa->matrix_time = fa->solver_time = fa->dependency_time = 0;
+  memset(&fa->profile, 0, sizeof(fa->profile));
 #endif
   fa->values = (mpz_t *)siqs_malloc(
       siqs_array_size(fa->alloc, sizeof(mpz_t)));
@@ -1586,6 +1970,29 @@ static const siqs_policy_band_t *siqs_policy_band(uint32_t bits) {
   return NULL;
 }
 
+static const siqs_policy_band_t *siqs_tlp_policy_band(uint32_t bits) {
+  uint32_t index;
+  for (index = 0; index < SIQS_TLP_POLICY_BAND_COUNT; ++index) {
+    const siqs_policy_band_t *band = &siqs_tlp_policy_bands[index];
+    if (bits >= band->first_bits && bits <= band->last_bits) return band;
+  }
+  return NULL;
+}
+
+static const siqs_policy_band_t *siqs_initial_policy_band(uint32_t bits,
+                                                       uint32_t options) {
+  if (options & SIQS_OPTION_2LP) return NULL;
+  if ((options & SIQS_OPTION_3LP) || bits >= SIQS_DEFAULT_TLP_MIN_BITS)
+    return siqs_tlp_policy_band(bits);
+  return NULL;
+}
+
+static double siqs_policy_scale(double scale) {
+  if (scale == 0.0) return 1.0;
+  if (!(scale > 0.0 && scale <= DBL_MAX))
+    croak("SIQS: invalid policy scale");
+  return scale;
+}
 
 static void siqs_resolve_policy(siqs_policy_t *policy, uint32_t bits,
                                 const siqs_policy_band_t *profile) {
@@ -1595,6 +2002,9 @@ static void siqs_resolve_policy(siqs_policy_t *policy, uint32_t bits,
   if (bits < band->first_bits || bits > band->last_bits)
     croak("SIQS: policy %s does not cover %u bits", band->name, bits);
   policy->band = band;
+  policy->fb_scale = siqs_policy_scale(band->fb_scale);
+  policy->lp_scale = siqs_policy_scale(band->lp_scale);
+  policy->r2_scale = siqs_policy_scale(band->r2_scale);
   policy->max_large_primes = band->production_large_primes;
   policy->q_count = band->q_count;
   policy->stage1_bias = band->stage1_bias_base;
@@ -1602,7 +2012,7 @@ static void siqs_resolve_policy(siqs_policy_t *policy, uint32_t bits,
     policy->stage1_bias += (uint8_t)(
         (bits - band->stage1_bias_origin_bits) /
         band->stage1_bias_step_bits);
-  policy->lp_multiplier = siqs_policy_curve_value(&band->k_l, bits);
+  policy->lp_multiplier = siqs_policy_curve_value(&band->k_l, bits) * policy->lp_scale;
   if (!siqs_policy_derived_r(&band->k_r))
     policy->residual_multiplier = siqs_policy_curve_value(&band->k_r, bits);
   if (!(policy->lp_multiplier >= 1.0 && policy->lp_multiplier <= DBL_MAX) ||
@@ -1641,6 +2051,9 @@ static void siqs_select_parameters(siqs_parameters_t *p, const mpz_t n,
   p->max_large_primes = policy.max_large_primes;
   p->lp_multiplier = policy.lp_multiplier;
   p->residual_multiplier = policy.residual_multiplier;
+  p->fb_scale = policy.fb_scale;
+  p->lp_scale = policy.lp_scale;
+  p->r2_scale = policy.r2_scale;
   p->q_count = policy.q_count;
   if (p->q_count == 0 || p->q_count > SIQS_MAX_A_PRIMES)
     croak("SIQS: invalid A-prime count for policy %s", p->policy_name);
@@ -1661,6 +2074,9 @@ static void siqs_select_parameters(siqs_parameters_t *p, const mpz_t n,
   ln_term = sqrt(ln_n * log(ln_n));
 
   fb = exp(p->fb_coefficient * ln_term);
+  /* Match the measured policy before floor/rounding. Interval selection is
+   * independent, so this preserves M and changes the actual FB and bounds. */
+  fb *= p->fb_scale;
   if (fb < (double)p->fb_floor) fb = (double)p->fb_floor;
   /* Ordered comparisons also reject NaN/infinity before narrowing.  Permit
    * the same fractional values that previously truncated to a valid size. */
@@ -2069,7 +2485,7 @@ static int siqs_u32_cmp(const void *va, const void *vb) {
 }
 
 static int siqs_raw_factors_are_packed(const siqs_raw_relation_t *r) {
-  return r->lp2 != 1;
+  return r->lp3 == 0 || r->lp2 != 1;
 }
 
 static uint32_t siqs_pack_raw_factor(uint32_t row, uint32_t exponent) {
@@ -2114,6 +2530,10 @@ static siqs_raw_relation_t *siqs_raw_relation_new(siqs_ctx_t *ctx,
   mpz_init_set(r->y, y);
   r->lp1 = lp1;
   r->lp2 = lp2;
+  r->lp3 = 1;
+#if SIQS_RESIDUAL_FIRST
+  r->rf_norm = NULL;
+#endif
   r->nfactors = nfactors;
   if (siqs_raw_factors_are_packed(r)) {
     r->factors.packed = (uint32_t *)(r + 1);
@@ -2129,14 +2549,30 @@ static siqs_raw_relation_t *siqs_raw_relation_new(siqs_ctx_t *ctx,
   return r;
 }
 
+static siqs_raw_relation_t *siqs_raw_relation_new3(siqs_ctx_t *ctx,
+    const mpz_t y, const siqs_factor_t *factors, uint32_t nfactors,
+    uint64_t lp1, uint64_t lp2, uint64_t lp3) {
+  siqs_raw_relation_t *raw = siqs_raw_relation_new(ctx, y, factors, nfactors, lp1, lp2);
+  raw->lp3 = lp3;
+  return raw;
+}
+
 static void siqs_raw_relation_free(siqs_ctx_t *ctx,
                                    siqs_raw_relation_t *r) {
   if (r == NULL)
     return;
+  size_t rf_allocation = 0;
+#if SIQS_RESIDUAL_FIRST
+  if (r->rf_norm != NULL) {
+    rf_allocation = (siqs_raw_allocation_size(r->nfactors) + 7U) & ~(size_t)7U;
+    rf_allocation += sizeof(*r->rf_norm);
+    mpz_clear(r->rf_norm->norm); mpz_clear(r->rf_norm->distinct);
+  }
+#endif
   mpz_clear(r->y);
   if (siqs_raw_factors_are_packed(r)) {
     siqs_raw_arena_discard_last(
-        &ctx->raw_arena, r, siqs_raw_allocation_size(r->nfactors));
+        &ctx->raw_arena, r, rf_allocation ? rf_allocation : siqs_raw_allocation_size(r->nfactors));
   } else {
     free(r->factors.wide);
     free(r);
@@ -2158,6 +2594,7 @@ static uint64_t siqs_relation_fingerprint(const siqs_raw_relation_t *r) {
   h ^= (uint64_t)mpz_fdiv_ui(r->y, 4294967279UL) << 32;
   h ^= siqs_mix64(r->lp1 + UINT64_C(0x243f6a8885a308d3));
   h ^= siqs_mix64(r->lp2 + UINT64_C(0x13198a2e03707344));
+  if (r->lp3 != 1) h ^= siqs_mix64(r->lp3 + UINT64_C(0xa4093822299f31d0));
   for (i = 0; i < r->nfactors; i++)
     h = siqs_mix64(h ^ ((uint64_t)siqs_raw_factor_row(r, i) << 32)
                      ^ siqs_raw_factor_exponent(r, i));
@@ -2181,7 +2618,7 @@ static void siqs_verify_raw_relation(const siqs_ctx_t *ctx,
       if (exponent & 1U)
         mpz_neg(rhs, rhs);
     } else {
-      mpz_set_ui(t, ctx->fb[row - 1].p);
+      siqs_mpz_set_u64(t, siqs_matrix_prime(ctx, row));
       mpz_powm_ui(t, t, exponent, ctx->n);
       mpz_mul(rhs, rhs, t);
       mpz_mod(rhs, rhs, ctx->n);
@@ -2194,6 +2631,12 @@ static void siqs_verify_raw_relation(const siqs_ctx_t *ctx,
   }
   if (r->lp2 != 1) {
     siqs_mpz_set_u64(t, r->lp2);
+    mpz_mul(rhs, rhs, t);
+    mpz_mod(rhs, rhs, ctx->n);
+  }
+  if (r->lp3 != 1) {
+    if (r->lp3 == 0) croak("SIQS: unresolved 3LP record reached relation verification");
+    siqs_mpz_set_u64(t, r->lp3);
     mpz_mul(rhs, rhs, t);
     mpz_mod(rhs, rhs, ctx->n);
   }
@@ -2776,11 +3219,28 @@ static void siqs_accept_one_lp_relation(siqs_ctx_t *ctx,
 
 #include "siqs_lp_inc.c"
 
+/* The collector retains originals, but scheduling and journal statistics
+ * count emitted LP-free combinations and independent LP pivots. */
+static uint32_t siqs_relation_count(const siqs_ctx_t *ctx) {
+  return ctx->lp_combiner != NULL ? ctx->lp_combiner->cycle_count : ctx->full_count;
+}
+
+static uint32_t siqs_partial_count(const siqs_ctx_t *ctx) {
+  return ctx->lp_combiner != NULL ? ctx->lp_combiner->rank
+                                : ctx->raw_count + ctx->one_lp.count;
+}
+
 static void siqs_accept_raw_relation(siqs_ctx_t *ctx,
                                      siqs_raw_relation_t *r) {
+#ifdef SIQS_TIMING
+  uint64_t timing_start = ctx->params.bits >= SIQS_TIMING_MIN_BITS ? siqs_timing_now() : 0;
+#endif
   uint64_t fingerprint = siqs_relation_fingerprint(r);
   if (!siqs_hashset_insert(&ctx->relation_hashes, fingerprint)) {
     siqs_raw_relation_free(ctx, r);
+#ifdef SIQS_TIMING
+    if (timing_start) ctx->result->profile.relation_accept_us += siqs_timing_elapsed(timing_start);
+#endif
     return;
   }
 #ifdef SIQS_DEBUG
@@ -2788,13 +3248,15 @@ static void siqs_accept_raw_relation(siqs_ctx_t *ctx,
 #endif
   if (ctx->journal != NULL)
     siqs_journal_relation(ctx, r);
-  if (r->lp1 == 1 && r->lp2 == 1)
+  if (r->lp3 > 1)
+    ctx->accepted_three_lp++;
+  else if (r->lp1 == 1 && r->lp2 == 1)
     ctx->accepted_smooth++;
   else if (r->lp1 == 1)
     ctx->accepted_one_lp++;
   else
     ctx->accepted_two_lp++;
-  if (ctx->lp_combiner != NULL) {
+  if (ctx->lp_combiner != NULL || ctx->params.max_large_primes == 3) {
     siqs_archive_lp_relation(ctx, r);
   } else if (siqs_use_one_lp_relation_path(ctx)) {
     siqs_accept_one_lp_relation(ctx, r);
@@ -2803,6 +3265,9 @@ static void siqs_accept_raw_relation(siqs_ctx_t *ctx,
     siqs_graph_add_relation(ctx, edge);
   }
   if (ctx->journal != NULL) sj_maybe_flush(ctx);
+#ifdef SIQS_TIMING
+  if (timing_start) ctx->result->profile.relation_accept_us += siqs_timing_elapsed(timing_start);
+#endif
 }
 
 /*----------------------------------------------------------------------------
@@ -3760,17 +4225,22 @@ static void siqs_run_sieve(siqs_ctx_t *ctx) {
 }
 
 static void siqs_clear_candidate_map(siqs_ctx_t *ctx) {
-  uint32_t i;
-  for (i = 0; i < ctx->candidate_count; i++) {
-    uint32_t pos = (uint32_t)(ctx->candidates[i].x
-                            + (int32_t)ctx->params.half_interval);
-#ifdef SIQS_DEBUG
-    if (pos >= ctx->sieve_length)
-      croak("SIQS: candidate lies outside the sieve interval");
+#if SIQS_RESIDUAL_FIRST
+  if (!ctx->residual_first)
 #endif
-    ctx->candidate_at[pos] = 0;
-    if (ctx->candidate_wide)
-      ctx->candidate_at_wide[pos] = 0;
+  {
+    uint32_t i;
+    for (i = 0; i < ctx->candidate_count; i++) {
+      uint32_t pos = (uint32_t)(ctx->candidates[i].x
+                              + (int32_t)ctx->params.half_interval);
+#ifdef SIQS_DEBUG
+      if (pos >= ctx->sieve_length)
+        croak("SIQS: candidate lies outside the sieve interval");
+#endif
+      ctx->candidate_at[pos] = 0;
+      if (ctx->candidate_wide)
+        ctx->candidate_at_wide[pos] = 0;
+    }
   }
   ctx->candidate_wide = 0;
   ctx->candidate_count = 0;
@@ -3795,22 +4265,6 @@ static void siqs_add_candidate(siqs_ctx_t *ctx, uint32_t pos) {
       croak("SIQS: invalid stage-1 candidate score");
     logical_score = physical_score - ctx->params.stage1_bias;
   }
-  if (ctx->candidate_count == UINT16_MAX) {
-    uint32_t i;
-    if (ctx->candidate_at_wide == NULL)
-      ctx->candidate_at_wide = (uint32_t *)siqs_calloc(
-          ctx->sieve_length, sizeof(uint32_t));
-    for (i = 0; i < ctx->candidate_count; i++) {
-      uint32_t old_pos = (uint32_t)(ctx->candidates[i].x
-                         + (int32_t)ctx->params.half_interval);
-#ifdef SIQS_DEBUG
-      if (old_pos >= ctx->sieve_length)
-        croak("SIQS: candidate migration left the sieve interval");
-#endif
-      ctx->candidate_at_wide[old_pos] = i + 1;
-    }
-    ctx->candidate_wide = 1;
-  }
   if (ctx->candidate_count == ctx->candidate_alloc) {
     ctx->candidate_alloc = ctx->candidate_alloc
                          ? siqs_capacity_double(ctx->candidate_alloc) : 1024;
@@ -3823,10 +4277,31 @@ static void siqs_add_candidate(siqs_ctx_t *ctx, uint32_t pos) {
   ctx->candidates[ctx->candidate_count].first_hit = SIQS_NO_INDEX;
   ctx->candidates[ctx->candidate_count].sieve_score =
       (uint8_t)logical_score;
-  if (ctx->candidate_wide)
-    ctx->candidate_at_wide[pos] = ctx->candidate_count + 1;
-  else
-    ctx->candidate_at[pos] = (uint16_t)(ctx->candidate_count + 1);
+#if SIQS_RESIDUAL_FIRST
+  if (!ctx->residual_first)
+#endif
+  {
+    if (ctx->candidate_count == UINT16_MAX) {
+      uint32_t i;
+      if (ctx->candidate_at_wide == NULL)
+        ctx->candidate_at_wide = (uint32_t *)siqs_calloc(
+            ctx->sieve_length, sizeof(uint32_t));
+      for (i = 0; i < ctx->candidate_count; i++) {
+        uint32_t old_pos = (uint32_t)(ctx->candidates[i].x
+                           + (int32_t)ctx->params.half_interval);
+#ifdef SIQS_DEBUG
+        if (old_pos >= ctx->sieve_length)
+          croak("SIQS: candidate migration left the sieve interval");
+#endif
+        ctx->candidate_at_wide[old_pos] = i + 1;
+      }
+      ctx->candidate_wide = 1;
+    }
+    if (ctx->candidate_wide)
+      ctx->candidate_at_wide[pos] = ctx->candidate_count + 1;
+    else
+      ctx->candidate_at[pos] = (uint16_t)(ctx->candidate_count + 1);
+  }
   ctx->candidate_count++;
 }
 
@@ -3997,11 +4472,15 @@ static void siqs_filter_candidates(siqs_ctx_t *ctx,
   uint32_t original_count = ctx->candidate_count;
   uint32_t read, out = 0;
   uint32_t small_hits[SIQS_POSTFILTER_MAX_SMALL];
+#if SIQS_RESIDUAL_FIRST
+  uint32_t small_exponents[SIQS_POSTFILTER_MAX_SMALL];
+#endif
   /* Filtering and evaluation do not overlap, so reuse the evaluation GMP
    * workspace instead of allocating two temporaries for every polynomial. */
   mpz_ptr q = ctx->eval.q;
   mpz_ptr twice_b = ctx->eval.y;
-  double log_smooth = log((double)ctx->params.smooth_bound);
+  double log_smooth = log(ctx->params.max_large_primes == 3
+      ? ctx->params.tlp_smooth_bound : (double)ctx->params.smooth_bound);
   double score_offset = ctx->params.sieve_raw_scores
                       ? 0.0 : (double)ctx->active_sieve_initial;
 
@@ -4019,18 +4498,24 @@ static void siqs_filter_candidates(siqs_ctx_t *ctx,
                             + (int32_t)ctx->params.half_interval);
     uint32_t hit_count = 0, i;
     double fine_margin;
-    int would_pass;
+    int qsign, would_pass;
 
 #ifdef SIQS_DEBUG
     if (pos >= ctx->sieve_length)
       croak("SIQS: postfilter candidate lies outside the sieve interval");
 #endif
-    ctx->candidate_at[pos] = 0;
-    if (ctx->candidate_wide)
-      ctx->candidate_at_wide[pos] = 0;
+#if SIQS_RESIDUAL_FIRST
+    if (!ctx->residual_first)
+#endif
+    {
+      ctx->candidate_at[pos] = 0;
+      if (ctx->candidate_wide)
+        ctx->candidate_at_wide[pos] = 0;
+    }
 
     siqs_filter_q(q, poly, twice_b, candidate.x);
-    if (mpz_sgn(q) == 0) {
+    qsign = mpz_sgn(q);
+    if (qsign == 0) {
       would_pass = 1;
     } else {
       mpz_abs(q, q);
@@ -4043,6 +4528,9 @@ static void siqs_filter_candidates(siqs_ctx_t *ctx,
           exponent = siqs_remove_ui(q, p);
           if (exponent == 0)
             croak("SIQS: postfilter root is not a polynomial factor");
+#if SIQS_RESIDUAL_FIRST
+          small_exponents[hit_count] = (uint32_t)exponent;
+#endif
           small_hits[hit_count++] = i;
         }
       }
@@ -4060,12 +4548,24 @@ static void siqs_filter_candidates(siqs_ctx_t *ctx,
     if (would_pass) {
       ctx->candidates[out] = candidate;
       ctx->candidates[out].first_hit = SIQS_NO_INDEX;
-      if (ctx->candidate_wide)
-        ctx->candidate_at_wide[pos] = out + 1;
-      else
-        ctx->candidate_at[pos] = (uint16_t)(out + 1);
-      for (i = 0; i < hit_count; i++)
-        siqs_add_hit(ctx, out, small_hits[i]);
+#if SIQS_RESIDUAL_FIRST
+      if (ctx->residual_first) {
+        siqs_rf_capture(ctx, poly, candidate.x, q, qsign < 0,
+                        small_hits, small_exponents, hit_count);
+        if (ctx->factor_found) {
+          ctx->candidate_count = out + 1U;
+          return;
+        }
+      } else
+#endif
+      {
+        if (ctx->candidate_wide)
+          ctx->candidate_at_wide[pos] = out + 1;
+        else
+          ctx->candidate_at[pos] = (uint16_t)(out + 1);
+        for (i = 0; i < hit_count; i++)
+          siqs_add_hit(ctx, out, small_hits[i]);
+      }
       out++;
     }
   }
@@ -4106,6 +4606,7 @@ static INLINE uint32_t siqs_resieve_cutoff(const uint32_t *prime,
   return lo;
 }
 
+
 static void siqs_resieve_candidates(siqs_ctx_t *ctx,
                                     uint32_t factor_begin,
                                     uint32_t progression_end) {
@@ -4121,9 +4622,17 @@ static void siqs_resieve_candidates(siqs_ctx_t *ctx,
   if (ctx->candidate_count == 0) {
     return;
   }
-  cutoff = siqs_resieve_cutoff(prime, factor_begin, progression_end,
-      ctx->candidate_count, ctx->params.half_interval,
-      ctx->resieve_one_subtract_index);
+  if (ctx->params.max_large_primes == 3 && ctx->resieve_model != NULL &&
+      factor_begin == ctx->resieve_model->begin &&
+      progression_end == ctx->resieve_model->end) {
+    cutoff = siqs_resieve_model_cutoff(ctx->resieve_model, ctx->candidate_count);
+  } else {
+    /* Ordinary operation keeps the production corrected dispatcher and does
+     * not construct an unused deep model. These indices already exist. */
+    cutoff = siqs_resieve_cutoff(prime, factor_begin, progression_end,
+        ctx->candidate_count, ctx->params.half_interval,
+        ctx->resieve_one_subtract_index);
+  }
   one_subtract_end = cutoff < ctx->resieve_identity_index
                    ? cutoff : ctx->resieve_identity_index;
   barrett_end = one_subtract_end < ctx->resieve_one_subtract_index
@@ -4348,7 +4857,7 @@ static int siqs_split_to_u64(const mpz_t n, uint32_t trial_start,
   *a = *b = 0;
   if (mpz_cmp_ui(n, 1) <= 0)
     return 0;
-  factors = siqs_factor(n, &count, trial_start, 0, 1U);
+  factors = gmp_siqs(n, &count, trial_start, 0, 0, 0);
   success = count >= 2;
   for (i = 0; success && i < count; i++) {
     if (!siqs_mpz_to_u64(factors[i], &value)) {
@@ -4368,12 +4877,19 @@ static int siqs_split_to_u64(const mpz_t n, uint32_t trial_start,
   return success;
 }
 
-/* Resolve a cofactor into zero, one, or two graph large primes. */
-static int siqs_resolve_cofactor(siqs_ctx_t *ctx, const mpz_t rest,
-                                 uint64_t *lp1, uint64_t *lp2) {
+typedef enum {
+  SIQS_COFACTOR_REJECTED = 0,
+  SIQS_COFACTOR_RESOLVED = 1,
+  SIQS_COFACTOR_UNRESOLVED = 2
+} siqs_cofactor_outcome_t;
+
+/* The arithmetic and ordinary 1LP/2LP acceptance policy are unchanged. The
+ * explicit terminal outcome lets the 3LP caller retain a splitter miss. */
+static siqs_cofactor_outcome_t siqs_resolve_cofactor_outcome(
+    siqs_ctx_t *ctx, const mpz_t rest, uint64_t *lp1, uint64_t *lp2) {
   uint64_t n, pmax2, a = 0, b = 0;
   uint32_t nbits;
-  int prime, valid, success = 0;
+  int prime, proper, valid, success = 0;
   uint64_t *method_counter = NULL;
 #ifdef SIQS_TIMING
   uint64_t timing_start;
@@ -4461,8 +4977,8 @@ static int siqs_resolve_cofactor(siqs_ctx_t *ctx, const mpz_t rest,
     }
   }
 
-  valid = success && a > 1 && b > 1 && n % a == 0 && n / a == b &&
-          a > ctx->largest_fb_prime && b > ctx->largest_fb_prime &&
+  proper = success && a > 1 && b > 1 && n % a == 0 && n / a == b;
+  valid = proper && a > ctx->largest_fb_prime && b > ctx->largest_fb_prime &&
           a <= ctx->params.large_prime_bound &&
           b <= ctx->params.large_prime_bound;
   /* All factor-base primes were removed.  Below pmax^3, neither of two
@@ -4478,7 +4994,7 @@ static int siqs_resolve_cofactor(siqs_ctx_t *ctx, const mpz_t rest,
       ctx->split_rejected++;
     else
       ctx->split_fail++;
-    return 0;
+    return proper ? SIQS_COFACTOR_REJECTED : SIQS_COFACTOR_UNRESOLVED;
   }
   ++*method_counter;
   if (a > b) {
@@ -4487,6 +5003,13 @@ static int siqs_resolve_cofactor(siqs_ctx_t *ctx, const mpz_t rest,
   *lp1 = a;
   *lp2 = b;
   return 1;
+}
+
+/* Preserve the existing boolean interface for ordinary 1LP/2LP callers. */
+static int siqs_resolve_cofactor(siqs_ctx_t *ctx, const mpz_t rest,
+                                 uint64_t *lp1, uint64_t *lp2) {
+  return siqs_resolve_cofactor_outcome(ctx, rest, lp1, lp2)
+      == SIQS_COFACTOR_RESOLVED;
 }
 
 static siqs_factor_t *siqs_eval_reserve_factors(siqs_ctx_t *ctx,
@@ -4548,6 +5071,8 @@ static uint32_t siqs_merge_candidate_factors(
   return out;
 }
 
+#include "siqs_3lp_inc.c"
+
 static void siqs_evaluate_candidate(siqs_ctx_t *ctx, const siqs_poly_t *poly,
                                     uint32_t candidate_index) {
   const siqs_candidate_t *candidate = &ctx->candidates[candidate_index];
@@ -4562,6 +5087,10 @@ static void siqs_evaluate_candidate(siqs_ctx_t *ctx, const siqs_poly_t *poly,
   mpz_ptr q = ctx->eval.q;
   mpz_ptr rest = ctx->eval.rest;
 
+#ifdef SIQS_TIMING
+  if (ctx->params.bits >= SIQS_TIMING_MIN_BITS)
+    ++ctx->result->profile.evaluated_candidates;
+#endif
 
   for (hit = candidate->first_hit; hit != SIQS_NO_INDEX;
        hit = ctx->hits[hit].next) {
@@ -4651,7 +5180,10 @@ static void siqs_evaluate_candidate(siqs_ctx_t *ctx, const siqs_poly_t *poly,
   }
   count = siqs_merge_candidate_factors(
       factors, hit_offset, hit_count, extra, extra_count);
-  if (siqs_resolve_cofactor(ctx, rest, &lp1, &lp2)) {
+  if (ctx->params.max_large_primes == 3) {
+    mpz_mod(y, y, ctx->n);
+    siqs_resolve_cofactor_3lp(ctx, rest, y, factors, count);
+  } else if (siqs_resolve_cofactor(ctx, rest, &lp1, &lp2)) {
     siqs_raw_relation_t *relation;
     mpz_mod(y, y, ctx->n);
     relation = siqs_raw_relation_new(ctx, y, factors, count, lp1, lp2);
@@ -4708,13 +5240,43 @@ static void siqs_evaluate_candidates(siqs_ctx_t *ctx,
 }
 
 static void siqs_sieve_polynomial(siqs_ctx_t *ctx, siqs_poly_t *poly) {
+#ifdef SIQS_TIMING
+  uint64_t mark = ctx->params.bits >= SIQS_TIMING_MIN_BITS ? siqs_timing_now() : 0;
+#endif
   siqs_run_sieve(ctx);
+#ifdef SIQS_TIMING
+  siqs_timing_stage(&mark, &ctx->result->profile.poly_sieve_us);
+#endif
   siqs_find_candidates(ctx);
+#ifdef SIQS_TIMING
+  siqs_timing_stage(&mark, &ctx->result->profile.poly_search_us);
+  if (mark) ctx->result->profile.initial_candidates += ctx->candidate_count;
+#endif
   siqs_filter_candidates(ctx, poly);
+#ifdef SIQS_TIMING
+  siqs_timing_stage(&mark, &ctx->result->profile.poly_filter_us);
+  if (mark) ctx->result->profile.filtered_candidates += ctx->candidate_count;
+#endif
+#if SIQS_RESIDUAL_FIRST
+  if (!ctx->residual_first) {
+#endif
   siqs_resieve_candidates(ctx, ctx->params.sieve_start,
                           ctx->params.fb_size);
+#ifdef SIQS_TIMING
+  siqs_timing_stage(&mark, &ctx->result->profile.poly_resieve_us);
+  if (mark) ctx->result->profile.resieve_hits += ctx->hit_count;
+#endif
   siqs_evaluate_candidates(ctx, poly);
+#ifdef SIQS_TIMING
+  siqs_timing_stage(&mark, &ctx->result->profile.poly_evaluate_us);
+#endif
+#if SIQS_RESIDUAL_FIRST
+  }
+#endif
   siqs_clear_candidate_map(ctx);
+#ifdef SIQS_TIMING
+  siqs_timing_stage(&mark, &ctx->result->profile.poly_clear_us);
+#endif
 }
 
 /*----------------------------------------------------------------------------
@@ -4759,7 +5321,7 @@ static la_col_t *siqs_build_matrix(siqs_ctx_t *ctx,
   uint32_t i, j;
   la_col_t *columns = (la_col_t *)siqs_calloc(
       ctx->full_count, sizeof(*columns));
-  *nrows = ctx->params.fb_size + 1;
+  *nrows = siqs_matrix_rows(ctx);
   *ncols = ctx->full_count;
   for (i = 0; i < ctx->full_count; i++) {
     const siqs_full_relation_t *r = ctx->full[i];
@@ -4786,11 +5348,10 @@ static la_col_t *siqs_build_matrix(siqs_ctx_t *ctx,
  * without changing or copying the full relations.  Keeping an incidence list
  * from rows to columns makes the peeling pass linear in the number of odd
  * factor-base exponents. */
-static int siqs_matrix_ready(siqs_ctx_t *ctx,
+static int siqs_matrix_core(siqs_ctx_t *ctx,
                              uint32_t *surviving_rows,
                              uint32_t *surviving_cols) {
-  const uint32_t nrows = ctx->params.fb_size + 1;
-  const uint32_t ncols = ctx->full_count;
+  uint32_t nrows, ncols;
   uint32_t *counts, *incidence, *queue;
   size_t *offsets, *next;
   uint8_t *removed;
@@ -4807,6 +5368,7 @@ static int siqs_matrix_ready(siqs_ctx_t *ctx,
            (uint64_t)*surviving_rows + SIQS_MATRIX_EXTRA_RELS(ctx);
   }
 
+  nrows = siqs_matrix_rows(ctx); ncols = ctx->full_count;
   counts = (uint32_t *)siqs_calloc(nrows, sizeof(*counts));
   for (col = 0; col < ncols; col++) {
     const siqs_full_relation_t *r = ctx->full[col];
@@ -4912,6 +5474,24 @@ static int siqs_matrix_ready(siqs_ctx_t *ctx,
 
   return (uint64_t)*surviving_cols >=
          (uint64_t)*surviving_rows + SIQS_MATRIX_EXTRA_RELS(ctx);
+}
+
+static int siqs_matrix_ready(siqs_ctx_t *ctx, uint32_t *rows, uint32_t *cols) {
+  /* Completed LP combinations already certify readiness. Leave an incomplete
+   * GCD batch buffered until the normal stop or solver drain. */
+  if (ctx->lp_combiner == NULL) siqs_tlp_flush(ctx);
+  return siqs_matrix_core(ctx, rows, cols);
+}
+
+static void siqs_print_matrix_progress(const siqs_ctx_t *ctx,
+                                        uint32_t rows, uint32_t cols, int ready) {
+  if (ctx->lp_combiner != NULL)
+    printf("# siqs LP combinations %u, FB/sign row bound %u%s\n",
+           cols, rows, ready ? ", ready" : "");
+  else
+    printf("# siqs matrix core %u columns, %u rows%s\n",
+           cols, rows, ready ? ", ready" : "");
+  fflush(stdout);
 }
 
 /* BIDS requests a classification for its single dependency. Batch callers
@@ -5368,16 +5948,41 @@ static int siqs_use_dense_solver(unsigned long ncols) {
          ncols <= LA_DENSE_CROSSOVER_COLS;
 }
 
+static void siqs_lp_matrix_stats(unsigned long nrows, unsigned long ncols,
+                                 const la_col_t *columns, uint32_t first_lp,
+                                 uint32_t *rows, uint32_t *lp_rows,
+                                 uint64_t *entries) {
+  uint8_t *used = siqs_calloc(nrows, 1);
+  unsigned long col, row;
+  *rows = *lp_rows = 0; *entries = 0;
+  for (col = 0; col < ncols; ++col) {
+    uint32_t j;
+    *entries += columns[col].weight;
+    for (j = 0; j < columns[col].weight; ++j) used[columns[col].data[j]] = 1;
+  }
+  for (row = 0; row < nrows; ++row) if (used[row]) {
+    ++*rows;
+    if (row >= first_lp) ++*lp_rows;
+  }
+  free(used);
+}
+
+/* The shared LP collector solves LP-free combinations; other paths use their FB matrix. */
 static int siqs_solve(siqs_ctx_t *ctx) {
   unsigned long original_cols, nrows, ncols, i;
   uint32_t block_attempt;
   uint64_t seed, mask = 0;
   uint64_t *nullrows = NULL;
   la_col_t *columns;
+  int combined = ctx->lp_combiner != NULL;
   int dense_selected, dense_result = 0, dense_tested = 0;
 #ifdef SIQS_TIMING
   uint64_t timing_start;
 #endif
+  siqs_tlp_flush(ctx);
+  if (ctx->factor_found)
+    return 1;
+  ctx->matrix_last_count = siqs_relation_count(ctx);
   if (siqs_relation_count(ctx) < SIQS_MATRIX_EXTRA_RELS(ctx))
     return 0;
   /* Seal pending collection before matrix construction/solving. The final
@@ -5397,16 +6002,36 @@ static int siqs_solve(siqs_ctx_t *ctx) {
           ? siqs_lp_combiner_matrix(ctx, &nrows, &ncols)
           : siqs_build_matrix(ctx, &nrows, &ncols);
   original_cols = ncols;
+  if (combined && ctx->verbose > 0) {
+    uint32_t rows, lp_rows;
+    uint64_t entries;
+    siqs_lp_combiner_t *s = ctx->lp_combiner;
+    siqs_lp_matrix_stats(nrows, ncols, columns, ctx->params.fb_size + 1U,
+                         &rows, &lp_rows, &entries);
+    printf("# siqs LP combination: %u accepted, rank %u -> %u relations; "
+           "%u FB/sign rows, %llu entries, no LP rows\n",
+           s->accepted, s->rank, s->cycle_count, rows, (unsigned long long)entries);
+    if (ctx->verbose > 1)
+      printf("# siqs LP basis: %llu entries, maximum intermediate LP weight %u, %u XORs, %llu replacements\n",
+             (unsigned long long)s->basis_entries, s->max_weight,
+             s->node_count - s->accepted, (unsigned long long)s->swaps);
+    fflush(stdout);
+  }
   la_reduce_matrix(&nrows, &ncols, columns, ctx->verbose);
+  if (combined && ctx->verbose > 0) {
+    uint32_t rows, lp_rows;
+    uint64_t entries;
+    siqs_lp_matrix_stats(nrows, ncols, columns, ctx->params.fb_size + 1U,
+                         &rows, &lp_rows, &entries);
+    printf("# siqs combined matrix: %u rows x %lu columns, %llu entries, %u LP rows\n",
+           rows, ncols, (unsigned long long)entries, lp_rows);
+  }
 #ifdef SIQS_TIMING
   if (timing_start != 0)
     ctx->result->matrix_time += siqs_timing_elapsed(timing_start);
 #endif
   if (ncols == 0) {
-    for (i = 0; i < original_cols; i++)
-      free(columns[i].data);
-    free(columns);
-    return 0;
+    goto solve_cleanup;
   }
   dense_selected = siqs_use_dense_solver(ncols);
   if (dense_selected) {
@@ -5474,6 +6099,7 @@ static int siqs_solve(siqs_ctx_t *ctx) {
       }
     }
   }
+solve_cleanup:
   for (i = 0; i < original_cols; i++)
     free(columns[i].data);
   free(columns);
@@ -5486,6 +6112,7 @@ static int siqs_solve(siqs_ctx_t *ctx) {
  * dependencies, and an unchanged batch must never be solved again. */
 static void siqs_solve_final_batch(siqs_ctx_t *ctx) {
   uint32_t rows, columns;
+  siqs_tlp_flush(ctx);
   if (ctx->use_bids || ctx->factor_found ||
       siqs_relation_count(ctx) <= ctx->matrix_last_count ||
       siqs_relation_count(ctx) < SIQS_MATRIX_EXTRA_RELS(ctx))
@@ -5516,11 +6143,11 @@ static void siqs_solve_final_batch(siqs_ctx_t *ctx) {
  * shorter.  Keep exact counts in the final statistics, not each progress line. */
 static void siqs_format_progress_count(char *text, uint64_t count) {
   if (count >= UINT64_C(1000000000))
-    sprintf(text, "%.1fG", (double)count / 1000000000.0);
+    snprintf(text, 24, "%.1fG", (double)count / 1000000000.0);
   else if (count >= UINT64_C(1000000))
-    sprintf(text, "%.1fM", (double)count / 1000000.0);
+    snprintf(text, 24, "%.1fM", (double)count / 1000000.0);
   else
-    sprintf(text, "%llu", (unsigned long long)count);
+    snprintf(text, 24, "%llu", (unsigned long long)count);
 }
 
 static uint64_t siqs_progress_poly_step(const siqs_ctx_t *ctx,
@@ -5546,16 +6173,54 @@ static void siqs_print_polynomial_notice(siqs_ctx_t *ctx, uint64_t poly_count) {
   }
 }
 
-static void siqs_print_relation_report(const siqs_ctx_t *ctx, uint32_t target,
+static void siqs_progress_snapshot(siqs_ctx_t *ctx, uint64_t poly_count) {
+  siqs_progress_snapshot_t *s = &ctx->progress_last;
+  s->full = siqs_relation_count(ctx);
+  s->smooth = ctx->accepted_smooth;
+  s->one_lp = ctx->accepted_one_lp;
+  s->two_lp = ctx->accepted_two_lp;
+  s->three_lp = ctx->accepted_three_lp;
+  s->polynomials = poly_count;
+  s->pending = siqs_tlp_pending_count(ctx);
+}
+
+static int siqs_progress_changed(const siqs_ctx_t *ctx, uint64_t poly_count) {
+  const siqs_progress_snapshot_t *s = &ctx->progress_last;
+  return s->full != siqs_relation_count(ctx) ||
+         s->smooth != ctx->accepted_smooth || s->one_lp != ctx->accepted_one_lp ||
+         s->two_lp != ctx->accepted_two_lp || s->three_lp != ctx->accepted_three_lp ||
+         s->polynomials != poly_count ||
+         s->pending != siqs_tlp_pending_count(ctx);
+}
+
+static void siqs_print_relation_report(siqs_ctx_t *ctx, uint32_t target,
                                        uint64_t poly_count) {
   char raw[24], polys[24];
   siqs_format_progress_count(raw, ctx->accepted_smooth
                                 + ctx->accepted_one_lp
-                                + ctx->accepted_two_lp);
+                                + ctx->accepted_two_lp + ctx->accepted_three_lp);
   siqs_format_progress_count(polys, poly_count);
-  printf("# siqs relations %u/%u, raw %s, polys %s = %.0fxFB\n",
-         siqs_relation_count(ctx), target, raw, polys,
-         (double)poly_count / ctx->params.fb_size);
+  if (ctx->lp_combiner != NULL) {
+    printf("# siqs relations %u/%u, raw %s, pending %zu, polys %s = %.0fxFB\n",
+           siqs_relation_count(ctx), target, raw,
+           siqs_tlp_pending_count(ctx), polys,
+           (double)poly_count / ctx->params.fb_size);
+  } else {
+    printf("# siqs relations %u/%u, raw %s, polys %s = %.0fxFB\n",
+           siqs_relation_count(ctx), target, raw, polys,
+           (double)poly_count / ctx->params.fb_size);
+  }
+  if (ctx->verbose > 2) {
+    const siqs_progress_snapshot_t *last = &ctx->progress_last;
+    printf("# siqs +rel %llu full, %llu 0LP, %llu 1LP, %llu 2LP, %llu 3LP; +%llu polys\n",
+           (unsigned long long)((uint64_t)siqs_relation_count(ctx) - last->full),
+           (unsigned long long)(ctx->accepted_smooth - last->smooth),
+           (unsigned long long)(ctx->accepted_one_lp - last->one_lp),
+           (unsigned long long)(ctx->accepted_two_lp - last->two_lp),
+           (unsigned long long)(ctx->accepted_three_lp - last->three_lp),
+           (unsigned long long)(poly_count - last->polynomials));
+  }
+  siqs_progress_snapshot(ctx, poly_count);
   fflush(stdout);
 }
 
@@ -5569,6 +6234,10 @@ static uint64_t siqs_polynomial_limit(const siqs_parameters_t *p) {
   }
   limit = (uint64_t)p->fb_size * SIQS_MAX_POLYNOMIALS_PER_FB;
   return limit < 1000000U ? 1000000U : limit;
+}
+
+static int siqs_relation_target_reached(const siqs_ctx_t *ctx, uint32_t target) {
+  return siqs_relation_count(ctx) >= target;
 }
 
 /* Through 400 bits, the 512*FB guard is below 2^30 polynomials. Above it,
@@ -5604,7 +6273,7 @@ static int siqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *poly,
         break;
       target = ctx->matrix_next_target;
     }
-    if (siqs_relation_count(ctx) >= target)
+    if (siqs_relation_target_reached(ctx, target))
       break;
 
     /* A ready matrix may use the last permitted polynomial. If its solve
@@ -5644,9 +6313,7 @@ static int siqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *poly,
              last_report_polys != *poly_count))
           siqs_print_relation_report(ctx, target, *poly_count);
         if ((ready && verbose > 1) || verbose > 2) {
-          printf("# siqs matrix core %u columns, %u rows%s\n",
-                 core_cols, core_rows, ready ? ", ready" : "");
-          fflush(stdout);
+          siqs_print_matrix_progress(ctx, core_rows, core_cols, ready);
         }
         *next_matrix_check = siqs_relation_count(ctx) + check_interval;
         if (ready) {
@@ -5672,7 +6339,7 @@ static int siqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *poly,
           siqs_print_relation_report(ctx, target, *poly_count);
         return 0;
       }
-      if (siqs_relation_count(ctx) >= target || ctx->factor_found)
+      if (siqs_relation_target_reached(ctx, target) || ctx->factor_found)
         break;
 
       have_next = siqs_next_B(ctx, poly);
@@ -5689,7 +6356,7 @@ static int siqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *poly,
     siqs_print_relation_report(ctx, target, *poly_count);
   return ctx->inline_matrix_solves
        ? ctx->factor_found
-       : siqs_relation_count(ctx) >= target || ctx->factor_found;
+       : siqs_relation_target_reached(ctx, target) || ctx->factor_found;
 }
 
 /* BIDS owns the serial relation stream. FB remains the reporting reference.
@@ -5738,6 +6405,7 @@ static void siqs_ctx_init(siqs_ctx_t *ctx, const mpz_t original,
   mpz_init(ctx->eval.y);
   mpz_init(ctx->eval.q);
   mpz_init(ctx->eval.rest);
+  mpz_init(ctx->tlp_upper);
   siqs_select_parameters(&ctx->params, n, profile);
   seed = (uint64_t)mpz_fdiv_ui(n, 4294967291UL);
   seed ^= (uint64_t)mpz_fdiv_ui(n, 4294967279UL) << 32;
@@ -5782,27 +6450,38 @@ static void siqs_set_large_prime_bounds(siqs_ctx_t *ctx) {
   uint64_t pmax = ctx->largest_fb_prime;
   siqs_parameters_t *p = &ctx->params;
   if (pmax == 0 || pmax > UINT32_MAX ||
-      (p->max_large_primes != 1 && p->max_large_primes != 2) ||
+      (p->max_large_primes < 1 || p->max_large_primes > 3) ||
       !(p->lp_multiplier >= 1.0 && p->lp_multiplier <= DBL_MAX) ||
       !(p->residual_multiplier >= 0.0 && p->residual_multiplier <= DBL_MAX))
     croak("SIQS: invalid large-prime bound parameters");
 
   p->large_prime_bound = siqs_scaled_bound(pmax, p->lp_multiplier, SIQS_LP_MAX);
   if (p->residual_multiplier != 0.0) {
-    uint64_t base = p->max_large_primes == 2 ? pmax * pmax : pmax;
+    uint64_t base = p->max_large_primes >= 2 ? pmax * pmax : pmax;
     p->smooth_bound = siqs_scaled_bound(base, p->residual_multiplier,
                                       SIQS_RESIDUAL_PRODUCT_MAX);
   } else {
     /* Coupled R follows the final LP, including its policy cap. */
-    p->smooth_bound = p->max_large_primes == 2
+    p->smooth_bound = p->max_large_primes >= 2
         ? siqs_bound_product(p->large_prime_bound, pmax, SIQS_RESIDUAL_PRODUCT_MAX)
         : p->large_prime_bound;
   }
+
+  /* Apply the row scale after resolving R2, preserving LP caps and integer
+   * rounding. Integral scales use exact products in siqs_scaled_bound. */
+  if (p->r2_scale != 0.0 && p->r2_scale != 1.0)
+    p->smooth_bound = siqs_scaled_bound(p->smooth_bound, p->r2_scale,
+                                      SIQS_RESIDUAL_PRODUCT_MAX);
+
+  if (p->max_large_primes == 3)
+    siqs_tlp_set_bounds(ctx);
 
   /* The exact candidate postfilter must accept the complete residual range. */
   p->sieve_hit_bound = p->sieve_hit_bound_nominal;
   if (p->sieve_hit_bound < p->sieve_hit_residual_multiplier * (double)p->smooth_bound)
     p->sieve_hit_bound = p->sieve_hit_residual_multiplier * (double)p->smooth_bound;
+  if (p->max_large_primes == 3 && p->sieve_hit_bound < 2.0 * p->tlp_smooth_bound)
+    p->sieve_hit_bound = 2.0 * p->tlp_smooth_bound;
 }
 
 /* Allocate polynomial/evaluation scratch, also used by private workers. */
@@ -5836,9 +6515,13 @@ static void siqs_workspace_allocate(siqs_ctx_t *ctx) {
       sieve_alloc = pmax_alloc;
     ctx->sieve = (uint8_t *)siqs_calloc(siqs_size_add(sieve_alloc, 8U), 1U);
   }
-  ctx->candidate_at = (uint16_t *)siqs_calloc(ctx->sieve_length,
-                                              sizeof(uint16_t));
+  /* Residual-first collection consumes candidate lists without resieving. */
+#if SIQS_RESIDUAL_FIRST
+  if (!ctx->residual_first)
+#endif
   {
+    ctx->candidate_at = (uint16_t *)siqs_calloc(ctx->sieve_length,
+                                                sizeof(uint16_t));
     ctx->resieve_one_subtract_index = 0;
     while (ctx->resieve_one_subtract_index < ctx->params.fb_size &&
            ctx->prime[ctx->resieve_one_subtract_index] <=
@@ -5848,6 +6531,14 @@ static void siqs_workspace_allocate(siqs_ctx_t *ctx) {
     while (ctx->resieve_identity_index < ctx->params.fb_size &&
            ctx->prime[ctx->resieve_identity_index] < ctx->sieve_length)
       ctx->resieve_identity_index++;
+    if (!ctx->shared_fb_tables && ctx->params.max_large_primes == 3) {
+      ctx->resieve_model = (siqs_resieve_model_t *)siqs_malloc(
+          sizeof(*ctx->resieve_model));
+      if (!siqs_resieve_model_init(ctx->resieve_model, ctx->prime,
+            ctx->params.sieve_start, ctx->params.fb_size, ctx->sieve_length,
+            ctx->params.half_interval))
+        croak("SIQS: cannot initialize resieve dispatch model");
+    }
   }
   /* Only the collector materializes cycles and evaluates dependencies. */
   if (!ctx->buffer_relations) {
@@ -5864,11 +6555,20 @@ static int siqs_ctx_allocate(siqs_ctx_t *ctx) {
   if (!siqs_build_factor_base(ctx))
     return 0;
   siqs_set_large_prime_bounds(ctx);
+#if SIQS_RESIDUAL_FIRST
+  ctx->residual_first = ctx->params.max_large_primes == 3 && !ctx->buffer_relations;
+#endif
   siqs_workspace_allocate(ctx);
   if (!ctx->buffer_relations && !ctx->use_bids &&
-      ctx->params.max_large_primes == 2)
+      ctx->params.max_large_primes >= 2)
     siqs_lp_combiner_init(ctx);
-  if (siqs_use_one_lp_relation_path(ctx))
+  if (ctx->params.max_large_primes == 3) {
+    siqs_tlp_init(ctx);
+#if SIQS_RESIDUAL_FIRST
+    siqs_rf_init(ctx);
+#endif
+  }
+  else if (siqs_use_one_lp_relation_path(ctx))
     siqs_one_lp_init(&ctx->one_lp);
   else if (ctx->lp_combiner == NULL)
     siqs_graph_init(&ctx->graph);
@@ -5879,6 +6579,9 @@ static int siqs_ctx_allocate(siqs_ctx_t *ctx) {
 
 static void siqs_ctx_clear(siqs_ctx_t *ctx) {
   uint32_t i;
+#if SIQS_RESIDUAL_FIRST
+  siqs_rf_clear(ctx);
+#endif
   for (i = 0; i < ctx->raw_count; i++)
     siqs_raw_relation_free(ctx, ctx->raw[i]);
   for (i = 0; i < ctx->full_count; i++) {
@@ -5889,6 +6592,11 @@ static void siqs_ctx_clear(siqs_ctx_t *ctx) {
   free(ctx->full);
   siqs_bids_free(ctx->bids);
   if (!ctx->shared_fb_tables) {
+    siqs_tlp_policy_clear(ctx);
+    if (ctx->resieve_model != NULL) {
+      siqs_resieve_model_clear(ctx->resieve_model);
+      free(ctx->resieve_model);
+    }
     free(ctx->fb);
     free(ctx->prime);
     free(ctx->sieve_logp);
@@ -5914,12 +6622,14 @@ static void siqs_ctx_clear(siqs_ctx_t *ctx) {
   siqs_one_lp_clear(ctx);
   siqs_raw_arena_clear(&ctx->raw_arena);
   siqs_graph_clear(&ctx->graph);
+  siqs_tlp_clear(ctx);
   siqs_lp_combiner_clear(ctx);
   siqs_hashset_clear(&ctx->relation_hashes);
   siqs_hashset_clear(&ctx->a_hashes);
   mpz_clear(ctx->eval.y);
   mpz_clear(ctx->eval.q);
   mpz_clear(ctx->eval.rest);
+  mpz_clear(ctx->tlp_upper);
   mpz_clear(ctx->n);
   mpz_clear(ctx->kn);
   memset(ctx, 0, sizeof(*ctx));
@@ -5956,6 +6666,7 @@ static int siqs_run(siqs_ctx_t *ctx) {
                              - ctx->params.fb_size / 4;
   int verbose = ctx->verbose;
   int threaded;
+  if (ctx->params.max_large_primes == 3) target_limit = UINT32_MAX - 1024U;
   if (retry_batch < 8)
     retry_batch = 8;
   if (retry_batch > SIQS_MATRIX_RETRY_BATCH_MAX)
@@ -5991,6 +6702,10 @@ static int siqs_run(siqs_ctx_t *ctx) {
     printf("# siqs policy %s [%u-%u], %u-LP\n",
            ctx->params.policy_name, ctx->params.policy_first_bits,
            ctx->params.policy_last_bits, ctx->params.max_large_primes);
+    if (ctx->params.fb_scale != 1.0 || ctx->params.lp_scale != 1.0 ||
+        ctx->params.r2_scale != 1.0)
+      printf("# siqs policy scales: FB x%.9g, K_L x%.9g, derived R2 x%.9g\n",
+          ctx->params.fb_scale, ctx->params.lp_scale, ctx->params.r2_scale);
     printf("# siqs mult %lu, FB %u (pmax %u), M %u, q %u, d %u, "
            "LP %llu, residual %llu, "
            "pmin %u (init %u)\n",
@@ -6001,6 +6716,25 @@ static int siqs_run(siqs_ctx_t *ctx) {
            (unsigned long long)ctx->params.smooth_bound,
            ctx->fb[ctx->params.sieve_start].p,
            (unsigned)ctx->params.sieve_initial);
+    if (ctx->params.max_large_primes == 3) {
+      unsigned batch_capacity = (unsigned)SIQS_TLP_BATCH_SIZE;
+#if SIQS_RESIDUAL_FIRST
+      if (ctx->rf != NULL) batch_capacity = (unsigned)ctx->rf->lp_capacity;
+#endif
+      gmp_printf("# siqs 3LP R3 %Zd, prime cutoff %u, batch %u (shared once per job)\n",
+          ctx->tlp_upper, ctx->params.tlp_cutoff, batch_capacity);
+    }
+#if SIQS_RESIDUAL_FIRST
+    if (ctx->rf != NULL)
+      printf("# siqs residual-first: exact FB screening, recover accepted rows; batch %u, tail %u, jobs %u (initial %u)\n",
+          (unsigned)ctx->rf->fb_capacity, (unsigned)ctx->rf->tail_norm_target, ctx->rf->job_limit, ctx->rf->job_count);
+    if (ctx->rf != NULL)
+      printf("# siqs residual batches FB %zu, LP %zu, tail FB %zu / LP %zu\n",
+          ctx->rf->fb_capacity, ctx->rf->lp_capacity,
+          ctx->rf->tail_norm_target, ctx->rf->tail_lp_target);
+#endif
+    if (ctx->tlp_policy != NULL)
+      printf("# siqs 3LP policy: guarded 2LP on, exact gap on, early admission off\n");
     if (ctx->block_prime_count != 0)
       printf("# siqs block sieve %u bytes (max %u)\n",
              ctx->block_length, (unsigned)SIQS_SIEVE_BLOCK_SIZE);
@@ -6014,6 +6748,9 @@ static int siqs_run(siqs_ctx_t *ctx) {
   if (sj_attach(ctx, &poly, &family_count, &poly_count))
     goto journal_cleanup;
   sj_begin_attempt(ctx);
+  /* A resumed process reports deltas from its restored checkpoint, excluding
+   * accepted records that were only replayed during this invocation. */
+  siqs_progress_snapshot(ctx, poly_count);
   /* A replay can already contain an entire inline matrix batch. Unlike live
    * candidate evaluation, replay has not run that inline solve yet. */
   if (ctx->journal != NULL && !ctx->use_bids && ctx->inline_matrix_solves &&
@@ -6039,6 +6776,10 @@ static int siqs_run(siqs_ctx_t *ctx) {
   } else {
     while (!ctx->factor_found && target <= target_limit) {
       int collected;
+#ifdef SIQS_TIMING
+      uint64_t collector_cpu_start = ctx->params.bits >= SIQS_TIMING_MIN_BITS
+                                  ? siqs_timing_cpu_now() : 0;
+#endif
 #ifdef PSIQS
       if (threaded)
         collected = psiqs_collect_relations(
@@ -6047,9 +6788,18 @@ static int siqs_run(siqs_ctx_t *ctx) {
 #endif
         collected = siqs_collect_relations(
             ctx, &poly, target, &next_matrix_check, &family_count, &poly_count);
+#ifdef SIQS_TIMING
+      if (collector_cpu_start)
+        ctx->result->profile.collector_cpu_us += siqs_timing_cpu_now() - collector_cpu_start;
+#endif
       if (!collected)
         break;
       if (ctx->factor_found)
+        break;
+      /* Exhaustion can leave an already-ready matrix after a failed solve.
+       * LP basis replacements preserve old cycle roots, so a retry needs at
+       * least one newly completed combination. */
+      if (siqs_relation_count(ctx) <= ctx->matrix_last_count)
         break;
       if (verbose > 0) {
         printf("# siqs linear algebra with %u relations\n", siqs_relation_count(ctx));
@@ -6099,7 +6849,10 @@ static int siqs_run(siqs_ctx_t *ctx) {
            (double)poly_count / ctx->params.fb_size);
     fflush(stdout);
   }
+  siqs_tlp_flush(ctx);
   siqs_solve_final_batch(ctx);
+  if (verbose > 1 && siqs_progress_changed(ctx, poly_count))
+    siqs_print_relation_report(ctx, target, poly_count);
   if (verbose > 0)
     printf("# siqs used %llu families, %llu polynomials, %llu candidates, "
            "%u full relations\n",
@@ -6124,6 +6877,29 @@ static int siqs_run(siqs_ctx_t *ctx) {
       printf(" %llu failed,", (unsigned long long)ctx->split_fail);
     printf(" %llu rejected\n", (unsigned long long)ctx->split_rejected);
   }
+  if (verbose > 0 && ctx->params.max_large_primes == 3) {
+    printf("# siqs 3LP: %llu triples, %llu queued, %llu batches; GCD one/proper/whole %llu/%llu/%llu; complete/reject %llu/%llu; %u LP labels\n",
+        (unsigned long long)ctx->accepted_three_lp, (unsigned long long)ctx->tlp_candidates,
+        (unsigned long long)ctx->tlp_batches, (unsigned long long)ctx->tlp_gcd_one,
+        (unsigned long long)ctx->tlp_gcd_proper, (unsigned long long)ctx->tlp_gcd_whole,
+        (unsigned long long)ctx->tlp_completed, (unsigned long long)ctx->tlp_rejected,
+        ctx->lp_combiner->label_count);
+    printf("# siqs 3LP cofactor work (this invocation): R2 attempts/resolved/rejected/fallback %llu/%llu/%llu/%llu; exact gap %llu, early admission 0 rejected\n",
+        (unsigned long long)ctx->tlp_r2_attempts,
+        (unsigned long long)ctx->tlp_r2_resolved,
+        (unsigned long long)ctx->tlp_r2_rejected,
+        (unsigned long long)ctx->tlp_r2_fallback,
+        (unsigned long long)ctx->tlp_gap_rejected);
+  }
+#if SIQS_RESIDUAL_FIRST
+  if (verbose > 0 && ctx->rf != NULL)
+    printf("# siqs residual-first: %llu norms, %llu jobs (%llu short), %llu recovered rows; peak active %u/%u, allocated %u slots\n",
+        (unsigned long long)ctx->rf->inputs_done,
+        (unsigned long long)ctx->rf->jobs_done,
+        (unsigned long long)ctx->rf->short_jobs,
+        (unsigned long long)ctx->rf->recovered,
+        siqs_rf_read_counter(ctx->rf, &ctx->rf->peak_active_jobs), ctx->rf->job_limit, ctx->rf->job_count);
+#endif
   sj_end_attempt(ctx);
 journal_cleanup:
   siqs_poly_clear(ctx, &poly);
@@ -6165,7 +6941,8 @@ static int siqs_try_policy(const mpz_t original, const mpz_t n,
 
 static mpz_t *siqs_factor_with_journal(const mpz_t n, uint32_t *nfactors,
                            uint32_t trial_start, int verbose,
-                           uint32_t nthreads, siqs_journal_t *journal) {
+                           uint32_t nthreads, siqs_journal_t *journal,
+                           uint32_t options) {
   siqs_factor_array_t result;
   const siqs_policy_band_t *profile;
   mpz_t work, divisor, root;
@@ -6180,6 +6957,18 @@ static mpz_t *siqs_factor_with_journal(const mpz_t n, uint32_t *nfactors,
     verbose = 0;
   if (nfactors == NULL)
     croak("SIQS: missing factor count output");
+  if (nthreads == 0)
+    nthreads = 1U;
+  if (nthreads > PSIQS_MAX_THREADS)
+    croak("SIQS: invalid worker count");
+#ifndef PSIQS
+  if (nthreads != 1) croak("SIQS: parallel support not compiled");
+#endif
+  if ((options & ~(SIQS_OPTION_3LP | SIQS_OPTION_2LP)) != 0)
+    croak("SIQS: unknown factorization option");
+  if ((options & (SIQS_OPTION_3LP | SIQS_OPTION_2LP)) ==
+      (SIQS_OPTION_3LP | SIQS_OPTION_2LP))
+    croak("SIQS: conflicting large-prime policy options");
   if (journal != NULL) {
     mpz_t *cached = sj_cached_call(journal, n, nfactors);
     if (cached != NULL) return cached;
@@ -6241,8 +7030,9 @@ static mpz_t *siqs_factor_with_journal(const mpz_t n, uint32_t *nfactors,
   if (bits >= SIQS_TIMING_MIN_BITS)
     timing_start = siqs_timing_now();
 #endif
+  profile = siqs_initial_policy_band(bits, options);
   factor_found = siqs_try_policy(
-      n, work, &result, NULL, divisor, root, verbose, nthreads);
+      n, work, &result, profile, divisor, root, verbose, nthreads);
   while (!factor_found && (profile = siqs_next_policy(bits, &next)) != NULL)
     factor_found = siqs_try_policy(
         n, work, &result, profile, divisor, root, verbose, nthreads);
@@ -6270,6 +7060,49 @@ static mpz_t *siqs_factor_with_journal(const mpz_t n, uint32_t *nfactors,
       printf("# siqs timing  cofactor splitter %.2f%% of requested %u-thread capacity\n",
              total > 0.0 ? 100.0 * cofactor / (total * nthreads) : 0.0,
              nthreads);
+    {
+      const siqs_profile_t *p = &result.profile;
+      const char *separator = "";
+      printf("# siqs profile workers: active wall %.6f s, CPU %.6f s, parked %.6f s; "
+             "%llu polys, %llu publications\n",
+             p->worker_active_us / 1e6, p->worker_cpu_us / 1e6, p->worker_parked_us / 1e6,
+             (unsigned long long)p->worker_polynomials, (unsigned long long)p->publications);
+      printf("# siqs profile worker phase sums: sieve %.6f, search %.6f, filter %.6f, "
+             "resieve %.6f, evaluate %.6f, clear %.6f s\n",
+             p->poly_sieve_us / 1e6, p->poly_search_us / 1e6, p->poly_filter_us / 1e6,
+             p->poly_resieve_us / 1e6, p->poly_evaluate_us / 1e6, p->poly_clear_us / 1e6);
+      printf("# siqs profile candidates: initial %llu, filtered %llu, evaluated %llu, hits %llu\n",
+             (unsigned long long)p->initial_candidates, (unsigned long long)p->filtered_candidates,
+             (unsigned long long)p->evaluated_candidates, (unsigned long long)p->resieve_hits);
+      printf("# siqs profile coordinator: collection CPU %.6f, merge %.6f, ready wait %.6f, "
+             "relation acceptance %.6f, LP combination %.6f s (nested scopes)\n",
+             p->collector_cpu_us / 1e6, p->merge_us / 1e6, p->ready_wait_us / 1e6,
+             p->relation_accept_us / 1e6, p->lp_combine_us / 1e6);
+      if (p->tlp_gcd_us || p->tlp_complete_us || p->tlp_setup_us) {
+        printf("# siqs profile 3LP: setup %.6f, GCD %.6f, results %.6f, completion %.6f, "
+               "acceptance %.6f s (nested scopes)\n",
+               p->tlp_setup_us / 1e6, p->tlp_gcd_us / 1e6, p->tlp_results_us / 1e6,
+               p->tlp_complete_us / 1e6, p->tlp_accept_us / 1e6);
+        if (p->tlp_worker_gcd_jobs || p->tlp_gcd_wait_us)
+          printf("# siqs profile worker GCD: CPU %.6f s, %llu jobs; "
+                 "coordinator wait %.6f s\n",
+                 p->tlp_worker_gcd_cpu_us / 1e6,
+                 (unsigned long long)p->tlp_worker_gcd_jobs,
+                 p->tlp_gcd_wait_us / 1e6);
+        printf("# siqs profile completion: primality %.6f/%llu, square %.6f/%llu, "
+               "ECM %.6f/%llu, SIQS %.6f/%llu (seconds/calls)\n",
+               p->tlp_prime_us / 1e6, (unsigned long long)p->tlp_prime_calls,
+               p->tlp_square_us / 1e6, (unsigned long long)p->tlp_square_calls,
+               p->tlp_ecm_us / 1e6, (unsigned long long)p->tlp_ecm_calls,
+               p->tlp_siqs_us / 1e6, (unsigned long long)p->tlp_siqs_calls);
+      }
+      printf("# siqs profile_json {");
+#define SIQS_PROFILE_PRINT(name) \
+      printf("%s\"" #name "\":%llu", separator, (unsigned long long)p->name); separator = ",";
+      SIQS_PROFILE_FIELDS(SIQS_PROFILE_PRINT)
+#undef SIQS_PROFILE_PRINT
+      printf("}\n");
+    }
   }
 #endif
 
@@ -6281,27 +7114,19 @@ finish:
   return siqs_factor_array_release(&result, nfactors);
 }
 
-/* Serial entry; the parallel entry uses the same engine and factor storage. */
-static mpz_t *siqs_factor(const mpz_t n, uint32_t *nfactors,
-    uint32_t trial_start, int verbose, uint32_t nthreads) {
-  return siqs_factor_with_journal(n, nfactors, trial_start, verbose, nthreads, NULL);
+mpz_t *gmp_siqs(const mpz_t n, uint32_t *nfactors, uint32_t trial_start,
+                int verbose, uint32_t nthreads, uint32_t flags) {
+  return siqs_factor_with_journal(n, nfactors, trial_start, verbose,
+                                 nthreads, NULL, flags);
 }
 
 mpz_t *gmp_siqs_journal_factor(siqs_journal_t *journal, const mpz_t n,
-    uint32_t *nfactors, uint32_t trial_start, int verbose, uint32_t nthreads) {
+    uint32_t *nfactors, uint32_t trial_start, int verbose, uint32_t nthreads,
+    uint32_t flags) {
   if (journal != NULL && (mpz_sgn(n) <= 0 || !mpz_divisible_p(journal->original, n)))
     croak("SIQS journal: requested cofactor does not divide original input");
-  if (nthreads == 0 || nthreads > PSIQS_MAX_THREADS)
-    croak("SIQS journal: invalid worker count");
-#ifndef PSIQS
-  if (nthreads != 1) croak("SIQS journal: parallel support not compiled");
-#endif
-  return siqs_factor_with_journal(n, nfactors, trial_start, verbose, nthreads, journal);
-}
-
-mpz_t *gmp_siqs(const mpz_t n, uint32_t *nfactors, uint32_t trial_start,
-                int verbose) {
-  return siqs_factor(n, nfactors, trial_start, verbose, 1);
+  return siqs_factor_with_journal(n, nfactors, trial_start, verbose,
+                                 nthreads, journal, flags);
 }
 
 #ifdef PSIQS

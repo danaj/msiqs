@@ -695,7 +695,7 @@ static void worker_fatal_cases(void) {
   uint32_t test;
   case_name = "invalid-counts-and-fatal-scratch-OOM";
   worker_fault_reset(); worker_fixture_open(&f, 2, 0);
-  for (test = 0; test < 3; test++) {
+  for (test = 0; test < 2; test++) {
     int errpipe[2], outpipe[2], status;
     char diagnostic[512], output[8];
     ssize_t bytes;
@@ -708,7 +708,7 @@ static void worker_fatal_cases(void) {
       if (dup2(errpipe[1], STDERR_FILENO) < 0 || dup2(outpipe[1], STDOUT_FILENO) < 0) _exit(1);
       close(errpipe[1]); close(outpipe[1]);
       alarm(20); seam_exit_status = 3;
-      if (test < 2) (void)gmp_psiqs(f.n, &count, 0, 0, test == 0 ? 0 : PSIQS_MAX_THREADS + 1U);
+      if (test == 0) (void)gmp_siqs(f.n, &count, 0, 0, PSIQS_MAX_THREADS + 1U, 0);
       else { seam_alloc_after = 3; (void)psiqs_pool_create(&f.ctx); }
       _exit(1); /* Returning instead of croaking is a failed check. */
     }
@@ -718,23 +718,26 @@ static void worker_fatal_cases(void) {
     CHECK(bytes > 0); diagnostic[bytes] = '\0';
     CHECK(read(outpipe[0], output, sizeof(output)) == 0);
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 3);
-    CHECK(strstr(diagnostic, test < 2 ? "worker count must be between" : "unable to allocate memory") != NULL);
+    CHECK(strstr(diagnostic, test == 0 ? "worker count" : "unable to allocate memory") != NULL);
     CHECK(diagnostic[bytes - 1] == '\n'); close(errpipe[0]); close(outpipe[0]);
   }
   worker_fixture_close(&f);
-  puts("PASS workers: invalid 0/257 requests and fatal worker-scratch OOM, stderr/status verified in children");
+  puts("PASS workers: out-of-range request and fatal worker-scratch OOM, stderr/status verified in children");
 }
 #endif
 
 static void worker_public_calls(void) {
   worker_fixture_t f;
-  uint32_t threads;
+  static const uint32_t counts[] = {0, 1, 2, 4};
+  size_t test;
   case_name = "repeated-public-factor-calls";
   worker_fault_reset(); worker_fixture_open(&f, 2, 0);
-  for (threads = 1; threads <= 4; threads *= 2) {
-    uint32_t count, i;
+  for (test = 0; test < sizeof(counts) / sizeof(*counts); test++) {
+    uint32_t count, i, threads = counts[test];
     mpz_t *values, product;
-    values = gmp_psiqs(f.n, &count, 0, 0, threads); CHECK(values != NULL && count == 2);
+    worker_fault_reset();
+    values = gmp_siqs(f.n, &count, 0, 0, threads, 0); CHECK(values != NULL && count == 2);
+    if (threads <= 1) CHECK(seam_thread_calls == 0);
     mpz_init_set_ui(product, 1);
     for (i = 0; i < count; i++) {
       CHECK(mpz_probab_prime_p(values[i], 25)); mpz_mul(product, product, values[i]);
@@ -743,7 +746,7 @@ static void worker_public_calls(void) {
     mpz_clear(product); gmp_siqs_free(values, count); worker_resources_clear();
   }
   worker_fixture_close(&f);
-  puts("PASS workers: repeated public 1/2/4-thread calls return exact prime partitions");
+  puts("PASS workers: public 0/1/2/4-thread calls return exact prime partitions");
 }
 
 typedef struct {
@@ -753,7 +756,7 @@ typedef struct {
 } worker_public_call_t;
 static void *worker_public_call(void *argument) {
   worker_public_call_t *call = (worker_public_call_t *)argument;
-  call->values = gmp_psiqs(call->n, &call->count, 0, 0, 2);
+  call->values = gmp_siqs(call->n, &call->count, 0, 0, 2, 0);
   return NULL;
 }
 static void worker_simultaneous_calls(void) {

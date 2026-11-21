@@ -1,16 +1,19 @@
-# SIQS relation journal, version 1
+# SIQS relation journal, version 2
 
 The msiqs front end can save and resume its relation collection.
 The format is implemented in `siqs_journal_inc.c`. Journal support is always compiled; creating a journal is optional. This format currently
 supports serial and pthreads restart, with one coordinator owning the file.
 
-msiqs is still under rapid development so the journal format could
-see changes in the near future.
+Journals are specific to the release that writes them. This release reads
+and writes version 2 only, for both ordinary and TLP collection. Earlier
+versions are rejected. Use the matching older checkout to read an older
+journal; no compatibility reader or converter is included. The format and
+resolved policies may change again during this period of development.
 
 
 ## Use and inspect
 
-From the `siqs` directory, create a journal and resume it with:
+From the repository root, create a journal and resume it with:
 
 ```sh
 ./msiqs -t 8 --journal job.journal 22095311209999409685885162322219
@@ -18,6 +21,11 @@ From the `siqs` directory, create a journal and resume it with:
 python3 tools/journal-info.py --verify-relations job.journal
 python3 tools/journal-info.py --follow --eta job.journal
 ```
+
+Use the same policy selection on the initial command and every restart.
+The default selects 3LP for post-trial cofactors from 361 bits; if the
+initial command used `--2lp` or `--3lp`, repeat that option on restart.
+A saved context must match the selected policy exactly.
 
 The Python 3.8+ inspector uses only the standard library. `--eta` prints one
 initial header followed by compact progress blocks. `--follow` exits after
@@ -61,10 +69,11 @@ replayed in their recorded order.  This permits a journal to cover the front
 end's entire pending-cofactor stack, including repeated cofactors.
 
 Raw relations are recorded **after fingerprint duplicate rejection and before
-relation-graph processing**.  Smooth relations, 1LP and 2LP partials, and the
-partial that closes a cycle all follow the same path.  Replaying these records
-through the ordinary acceptance function rebuilds fingerprints, 1LP anchors,
-the 2LP graph, and completed relations.  Graph links and union-find state are
+relation-graph processing**.  Smooth relations, 1LP, 2LP, and 3LP partials, and
+the partial that closes a cycle all follow the same path.  Replaying these records
+through the ordinary acceptance function rebuilds fingerprints, the shared
+2LP/3LP combination stage or dedicated 1LP collector, and completed relations.
+Graph links and union-find state are
 not serialized.  No second collection is needed when the saved prefix already
 contains enough relations to finish.
 
@@ -96,7 +105,7 @@ using LF line endings on all platforms:
 
 ```text
 MPUSIQJ
-Version: 1
+Version: 2
 Byte-order: little-endian
 N: 1000000016000000063
 --
@@ -118,7 +127,7 @@ preamble also declares the version and integer byte order:
 | Offset | Size | Value |
 | ---: | ---: | --- |
 | 0 | 8 | ASCII `MPUSIQJ` followed by a zero byte |
-| 8 | 4 | format version, `u32(1)` |
+| 8 | 4 | format version, `u32(2)` |
 | 12 | 4 | byte-order marker, `u32(0x01020304)` |
 
 These offsets are relative to the start of the binary stream, not the file.
@@ -171,8 +180,10 @@ relation counts as its baseline.  A new context instead starts its baseline
 at its context frame's timestamp.  A first batch timestamped zero has no
 measurable first interval; later batches still provide rates.
 
-Clock reads occur once at the start of resumed work and when sealing frames.
-POSIX uses `CLOCK_REALTIME` and `CLOCK_MONOTONIC`; Windows uses
+The writer reads the clocks at the start of resumed work and when sealing
+frames. In 3LP it also reads the monotonic clock to check whether a periodic
+checkpoint is due and to reset the checkpoint timer after a flush. POSIX uses
+`CLOCK_REALTIME` and `CLOCK_MONOTONIC`. Windows uses
 `GetSystemTimeAsFileTime` and `QueryPerformanceCounter`. The separate
 embedded edition contains no journal code or clock instrumentation.
 
@@ -199,6 +210,9 @@ This is the collection-attempt header.  Item count is one.  It contains:
 2. Multiplier `k`, as `u64`.
 3. Packed-factor row width, `u32(21)`.
 4. Policy-name byte length (`u32`) and those bytes, without a terminator.
+   For 3LP, the name ends with the ASCII compatibility tag
+   `;tlp-policy-v1:r1:g1:e0:b0000000000000000`. The length includes the tag,
+   and replay compares the entire field byte for byte.
 5. The resolved unsigned parameter fields below, each as `u64`.
 6. The resolved double parameter fields below, each encoded as its IEEE 754
    binary64 bit pattern in a little-endian `u64`.
@@ -217,7 +231,7 @@ fb_size, half_interval, q_count, poly_d, target_relations,
 sieve_start, sieve_free_units, sieve_start_prime_floor, fb_floor,
 relation_extra, multiplier_refine_divisor, fixed_half_interval,
 sieve_initial, stage1_bias, sieve_raw_scores, sieve_saturating,
-sieve_score_bound, large_prime_bound, smooth_bound
+sieve_score_bound, large_prime_bound, smooth_bound, tlp_cutoff
 ```
 
 Binary64 parameter order:
@@ -225,7 +239,8 @@ Binary64 parameter order:
 ```
 lp_multiplier, residual_multiplier, sieve_start_index_exponent,
 fb_coefficient, interval_scale, sieve_hit_exponent,
-sieve_hit_bound_nominal, sieve_hit_residual_multiplier, sieve_hit_bound, log_scale
+sieve_hit_bound_nominal, sieve_hit_residual_multiplier, sieve_hit_bound, log_scale,
+tlp_smooth_bound
 ```
 
 Row zero represents the sign. Factor-base entry zero supplies row one, and
@@ -242,40 +257,45 @@ by this version.
 
 ### 3: BATCH
 
-The payload begins with twenty-four `u64` progress values (192 bytes), in
+The payload begins with thirty-two `u64` progress values (256 bytes), in
 this order:
 
 ```
 selected_family_count, completed_polynomial_count,
 total_candidates, split_attempts, split_square, split_siqs,
 split_squfof, split_ecm, split_fail, split_rejected,
+tlp_candidates, tlp_batches, tlp_gcd_one, tlp_gcd_proper, tlp_gcd_whole,
+tlp_completed, tlp_rejected,
 la_rng_state, cofactor_rng_state, polynomial_rng_state,
-completed_full_relations, retained_partials, current_collection_target,
+stored_relations, retained_partials, current_collection_target, full_relations,
 length_1, length_2, length_3, length_4, length_5, length_6, length_7, length_8plus
 ```
 
-The SQUFOF counter is retained for historical journals; new splits increment
-`split_ecm` instead. ECM uses the former `split_rho` slot, which was always
-zero before ECM was introduced. The version-1 layout remains unchanged.
+`split_squfof` is a legacy counter. ECM uses the former `split_rho` slot,
+which was always zero before ECM was introduced. Version 2 retains those
+counter positions within its expanded snapshot.
 
-The snapshot describes graph state after every relation in this batch has
-been processed.  Size/event-triggered flushes therefore occur after processing
-the triggering relation; completed-family flushing is unchanged.  Retained
-partials describe the rank of the LP parity map. The older graph collector
-stores this as raw graph records plus dedicated 1LP anchors; the general LP
-collector keeps every accepted original and a sparse LP basis. Completed
-relations count independent LP-free combinations, rather than retained originals.
+The snapshot describes collection state after the batch's events have been
+processed. `stored_relations` counts retained relation records.
+`full_relations` counts completed relations and drives collection progress.
+With the shared LP combiner, these are independent LP-free combinations,
+and the two counts can differ. For ordinary collection, replay also accepts
+the equal counts used by older development graph writers with the v2 layout.
 
-The eight length bins are diagnostic and sum to completed_full_relations.
-For the older collector they count raw relations per completed relation:
-smooth records have length 1, dedicated 1LP pairs length 2, and graph cycles
-their edge count. The general collector bins a conservative bound on the
-number of original occurrences in its provenance DAG. Different valid kernel
-bases can produce different bins. Replay verifies logical full/partial counts,
-checks the bin total, and preserves the producer's histogram. An older failed
-LP inversion can discard a cycle while finding a factor; that completed-count
-difference is allowed only after verifying the reconstructed proper split.
-Replay also restores the polynomial RNG state.
+For ordinary collection with the shared combiner, `retained_partials` is
+the LP parity rank. For other ordinary collectors, it is the number of
+retained raw partials plus dedicated 1LP anchors. The 3LP writer currently
+sets this field to zero and counts its originals in `stored_relations`.
+
+The eight length bins are diagnostic and sum to `full_relations`. Graph bins
+count raw relations per completed relation; the shared LP collector uses a
+conservative provenance cost that may count reused contributions more than
+once. Different valid kernel bases can produce different bins. Replay checks
+logical counts and the bin total and preserves the producer's histogram.
+An older development graph writer can discard a cycle when a failed LP
+inversion finds a factor. For a compatible v2 journal, combiner replay
+allows this difference in `full_relations` only after verifying a proper
+split. Replay also restores the polynomial RNG state.
 
 The rest is an ordered stream of events.  The frame's item count is the
 number of events, not just the number of relations.  Each event starts with
@@ -287,22 +307,21 @@ two bytes, in this order:
 | info | u8 | LP count for a relation; q for an A-family |
 
 The outer frame type remains `u32`; these are the inner BATCH event headers.
-This replaces the earlier development encoding with `u32` event tags, which
-is not compatible with this layout. The development format version stays 1.
 
 **Kind 1: relation**
 
-Info gives the number of actual large-prime labels, from zero through four:
-zero is smooth, one is 1LP, two is 2LP, and so on.  Exactly that many labels
-follow, in nondecreasing order; each is greater than one.  No unused slots
-or placeholder values are written.  Each actual label uses exactly
+Info gives the number of actual large-prime labels. Zero denotes a smooth
+relation. The count must fit the context's LP mode. Exactly that many
+labels follow in nondecreasing order, each greater than one and at most
+the context's `large_prime_bound`. The record has no unused label slots.
+Each actual label uses exactly
 `max(1, ceil(bit_length(large_prime_bound)/8))` bytes, little endian.
 This width is resolved once per context, not per relation.
 
-The inspector can decode and verify 3LP/4LP records.  Current SIQS collection
-and replay support only zero through two LPs; replay rejects larger counts
-explicitly.  The event encoding leaves room for those future modes without
-adding overhead to current relation records.
+Current SIQS collection and replay support zero through three labels. The
+inspector also supports four labels in a context that allows them, including
+congruence checks with `--verify-relations`. The default selects 3LP from
+361 bits, with `--2lp` and `--3lp` overriding policy selection.
 
 After the large prime labels:
 
@@ -310,10 +329,8 @@ After the large prime labels:
 - Factor count, `u32`.
 - That many delta/exponent entries as described below.
 
-For the current 0–2LP implementation, internal label pairs remain `(1,1)`
-for smooth, `(1,p)` for 1LP, and `(p,q)` for 2LP; only nontrivial labels are
-stored.  Each factor entry starts with the canonical unsigned
-LEB128 encoding of `(row_delta << 1) | (exponent != 1)`.  If the low bit is
+Each factor entry starts with the canonical unsigned LEB128 encoding of
+`(row_delta << 1) | (exponent != 1)`.  If the low bit is
 set, the exponent follows as another canonical ULEB128 value; otherwise it
 is implicitly 1.  An explicitly encoded exponent must be at least 2.
 
@@ -353,18 +370,31 @@ last committed frame can have an unsaved suffix; that suffix is abandoned.
 Uncommitted events in the final in-memory batch are also lost.  Previously
 committed accepted relations remain usable.
 
-The normal flush threshold is 256 events or 256 KiB, whichever is reached
-first; an event is never divided between frames.  Serial collection also
-flushes before selecting the next family, and the parallel coordinator
-flushes after merging each worker family.  Thus sparse jobs do not wait for
-hundreds of families to fill an event batch. Matrix solves flush pending
-events before matrix construction, so those batch timestamps exclude the
-subsequent linear algebra. Attempt completion flushes any remaining events.
-Older development journals may have sealed their last batch after solving;
-their last batch timestamp can include that delay.
-`SIQS_JOURNAL_BATCH_BYTES` can lower the byte threshold
-for development tests.  Progress snapshots are taken at flush time; they are
-not exact continuation points inside a polynomial or worker buffer.  Accepted
+Ordinary collection flushes at 256 events or 256 KiB, whichever is reached
+first. Serial collection also flushes before selecting the next family,
+and the ordinary parallel coordinator flushes after merging each worker
+family.
+
+A periodic TLP checkpoint saves the coordinator's accepted relations and
+graph statistics while residual jobs keep running. Pending residual work is
+not serialized. Parallel TLP uses a 4 MiB byte target with a twenty-second
+monotonic time target for a nonempty buffer, checked between result
+publications as the coordinator processes events. This is a checkpoint target,
+not a strict time limit on a worker job.
+
+Restart discards unfinished sieve buffers and residual queues, including
+partly filled LP batches that may contain candidates older than the last
+checkpoint. Previously committed accepted relations remain reusable. The
+recorded A-family sequence restores the chooser beyond those unfinished
+families; worker buffers are not exact continuation points.
+
+An event is never divided between frames. Matrix solves drain pending
+residual work and flush accepted events before matrix construction, so those
+batch timestamps exclude the subsequent linear algebra. Attempt completion
+also drains pending work and flushes any remaining events.
+`SIQS_JOURNAL_BATCH_BYTES` can lower the byte thresholds for development
+tests; the TLP target is sixteen times the ordinary threshold. Progress
+snapshots are taken at flush time. Accepted
 relation totals are rebuilt from the records, not copied from counters.
 
 ### 4: ATTEMPT\_END
@@ -395,19 +425,21 @@ Item count is one.  Payload is `u32(complete)`, followed by the original-input
 magnitude, partition count (`u32`) and the final partition magnitudes.
 Complete is zero or one; the partition must multiply to the original input.
 The front end writes this only after processing every pending cofactor and
-sorting its final factor list.  Complete is one when it finished factoring;
-zero records a normal return that left an unresolved composite.
+sorting its final factor list. Complete is one when all final factors pass
+primality testing. Zero records a normal return that left an unresolved
+composite.
 
 This is the terminal record for the whole job, not an individual recovery
 attempt or cofactor call.  It must follow any ATTEMPT\_END/RETURN records.
 Closing a journal does not write JOB\_END.  An interrupted writer consequently
 leaves no promise that the job finished.  Completed replay verifies and
-consumes this record without appending another one.  A valid older prefix
+consumes this record without appending another one.  A valid interrupted prefix
 without JOB\_END can gain one when the front end finishes its replay.
 
-The inspector validates the final partition and status. `--follow` exits
-after reading JOB\_END, including when the status reports incomplete factoring;
-without that record it keeps waiting.  Complete frames after JOB\_END are
+The inspector checks that the final partition multiplies to the input and
+that the completion flag is zero or one. `--follow` exits after reading
+JOB\_END, including when the status reports incomplete factoring. Without
+that record it keeps waiting. Complete frames after JOB\_END are
 rejected.  The record does not announce the earlier instant when sieving stops.
 
 ## Interrupted writes and durability

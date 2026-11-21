@@ -216,7 +216,7 @@ int main(int argc, char **argv) {
     }
     bench_input_id++;
     bench_matrix_id = 0;
-    factors = gmp_siqs(n, &nfactors, 0, 0);
+    factors = gmp_siqs(n, &nfactors, 0, 0, 0, 0);
     mpz_set_ui(product, 1);
     for (i = 0; i < nfactors; i++) {
       if (mpz_cmp_ui(factors[i], 1) <= 0 || !mpz_probab_prime_p(factors[i], 15)) status = 1;

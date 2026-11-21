@@ -24,26 +24,33 @@ my @compiler = shellwords($cc);
 die "empty compiler command\n" unless @compiler;
 my @flags = (shellwords($cppflags), shellwords($cflags));
 my @link_flags = shellwords($ldflags);
-my $threaded = 0;
+my @libraries = shellwords($ldlibs);
+my @thread_flags = ('-DPSIQS', '-pthread');
+my ($threaded, $atomics) = (0, 0);
 unless ($serial) {
-  my $temporary = tempdir('siqs-pthread-XXXXXX', TMPDIR => 1, CLEANUP => 1);
+  my $temporary = tempdir('siqs-probes-XXXXXX', TMPDIR => 1, CLEANUP => 1);
   my $probe = File::Spec->catfile($temporary, 'pthread-probe');
+  my $atomic_probe = File::Spec->catfile($temporary, 'atomic-probe');
   my $log = File::Spec->catfile($temporary, 'probe.log');
-  {
-    local *STDOUT;
-    local *STDERR;
-    open STDOUT, '>', $log or die "cannot open $log: $!\n";
-    open STDERR, '>&', \*STDOUT or die "cannot redirect probe errors: $!\n";
-    $threaded = system(@compiler, @flags, @link_flags, '-pthread', '-o', $probe,
-                      File::Spec->catfile($Bin, 'pthread-probe.c')) == 0;
-  }
+  # Redirect the file descriptors inherited by the compiler.
+  open my $stdout, '>&', \*STDOUT or die "cannot save stdout: $!\n";
+  open my $stderr, '>&', \*STDERR or die "cannot save stderr: $!\n";
+  open STDOUT, '>', $log or die "cannot open $log: $!\n";
+  open STDERR, '>&', \*STDOUT or die "cannot redirect probe errors: $!\n";
+  $threaded = system(@compiler, @flags, @thread_flags, @link_flags, '-o', $probe,
+                    File::Spec->catfile($Bin, 'pthread-probe.c'), @libraries) == 0;
+  $atomics = system(@compiler, @flags, @link_flags, '-o', $atomic_probe,
+                   File::Spec->catfile($Bin, 'atomic-probe.c'), @libraries) == 0;
+  open STDOUT, '>&', $stdout or die "cannot restore stdout: $!\n";
+  open STDERR, '>&', $stderr or die "cannot restore stderr: $!\n";
 }
 
 print "Building $output ", ($threaded ? 'with pthreads' : 'serial-only'), "\n";
 $| = 1;
 my @command = (@compiler, @flags);
-push @command, $threaded ? ('-DPSIQS', '-pthread') : ('-UPSIQS');
-push @command, @link_flags, '-o', $output, @ARGV, shellwords($ldlibs);
+push @command, $threaded ? @thread_flags : '-UPSIQS';
+push @command, '-DSIQS_HAVE_RF_ATOMICS=1' if $threaded && $atomics;
+push @command, @link_flags, '-o', $output, @ARGV, @libraries;
 print join(' ', map {shell_quote($_)} @command), "\n";
 system(@command);
 my $status = $?;

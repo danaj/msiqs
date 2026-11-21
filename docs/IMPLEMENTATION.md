@@ -9,9 +9,9 @@ isolated optimization:
   polynomial selection.
 - A cache-blocked byte sieve, inexpensive root updates, and specialized
   one-hit and two-hit kernels for large primes.
-- Partial relations with one or two large primes, combined into full relations
-  before constructing the matrix.  Collection readiness is based on useful
-  relations from the graph, not just the raw number of partials received.
+- Partial relations with up to three large primes.  For 2LP and 3LP,
+  collection readiness is based on how many LP-free combinations are
+  available for the matrix.
 - A bounded incremental dependency solver ([BIDS](#bids)) for small factor bases.
   It can use a dependency as soon as it arrives, without collecting a complete
   batch first.  Larger problems use dense elimination or block Lanczos.
@@ -114,6 +114,68 @@ backup policy bands for inputs up to 64 bits.  These are very rarely
 used but essential to allow simultaneous goals of always factoring and
 maintaining the best average performance.  They cost nothing for inputs
 that don't need them.
+
+Three-large-prime collection has its own sparse table,
+`siqs_tlp_policy_bands`, immediately after the ordinary table and before
+recovery policies. Its `3lp_...` rows currently cover 270 through 512 bits.
+Selection uses the post-trial cofactor size: ordinary policies through
+360 bits, and 3LP from 361 bits. `--2lp` forces the ordinary policies;
+`--3lp` selects the 3LP table wherever it covers the cofactor. Selection is
+local to one factorization call; uncovered sizes and internal cofactor
+splitters use the ordinary policies.
+
+3LP routes eligible residuals through the guarded 2LP splitter up to `R2`.
+The batch GCD screens for a prime in `(P, U]`, and completion can accept
+labels through `LP`. The smaller cutoff `U` limits memory use and can miss
+otherwise admissible partials whose large primes all exceed `U`. Before
+batching, the classifier rejects residuals that exceed the pair bounds for
+both routes and are too small to contain three large primes. The provisional
+cutoff is five eighths of the integer cube root of `R3`, rounded down.
+See [How LP and R are selected](#how-lp-and-r-are-selected) for the bounds.
+
+Residual-first processing strips the FB part in batches,
+tests the remaining cofactor, and recovers exact FB exponents only for
+accepted records. An available sieve worker runs a batch job, with the
+coordinator as fallback. The residual pool starts with one private context
+and grows for full producer batches up to the worker count. Small tail
+batches reuse existing contexts. Immutable prime products are shared across
+contexts. Equal FB/LP batch capacities also share one mutable product-tree
+workspace within each context. Result descriptors grow with accepted output.
+Sieve workers publish bounded chunks throughout collection and can resume
+the same polynomial family. Residual batches shrink near the collection target.
+
+Periodic journal checkpoints save the coordinator's accepted state while
+residual jobs continue. On restart, pending sieve and residual work is
+discarded, including candidates published by workers and still awaiting
+acceptance. Collection completion and matrix solves drain pending
+results. See [JOURNAL.md](JOURNAL.md).
+
+Accepted 0LP through 3LP records enter a shared LP combination stage. It
+tracks LP parity and provenance, eliminates LP pivots, and produces LP-free
+combinations for the existing factor-base matrix and solvers. The original
+records are retained for square-root reconstruction. Ordinary 2LP collection
+uses the same combiner; the dedicated 1LP collector and BIDS keep their paths.
+
+The private include `siqs_batch_gcd_inc.c` provides batch-GCD arithmetic for
+factor-base and large-prime screening. `siqs_3lp_inc.c` owns 3LP collection,
+worker jobs, and cofactor completion. The shared combiner lives in
+`siqs_lp_inc.c`. All three are part of the `siqs.c` translation unit.
+Completion starts from the LP-product GCD and its quotient. Either piece can
+still exceed 64 bits. After a positive batch GCD, it handles squares, uses
+tinyecm64 for composite pieces fitting in 64 bits, then quiet ordinary SIQS on
+a miss or for larger pieces.
+An ECM prepass with tinyecm128 saved about 5–10% of completion CPU in
+replay tests. The estimated end-to-end gain was too small to justify the
+additional code.
+
+Completion pieces inherit the fully stripped residual's absence of prime
+factors through P. With Q=nextprime(P), pieces below Q² therefore avoid a
+redundant primality test while retaining the LP-bound checks. Composite pieces
+fitting in 64 bits try tinyecm64 regardless of their origin. Larger pieces
+keep the quiet-SIQS route. Squares, remaining
+label budgets, multiplicities and exact product validation are retained.
+These choices affect the TLP completion path; the ordinary cofactor
+splitter and the guarded 2LP route retain their existing policy.
 
 ## Choosers
 
@@ -224,33 +286,35 @@ We developed BIDS independently, before finding this paper.
 
 ## Combining partial relations
 
-For ordinary 2LP collection, a sparse GF(2) basis eliminates only the
+For ordinary 2LP and 3LP collection, a sparse GF(2) basis eliminates only the
 large-prime parities. Each dependent insertion produces an independent
 LP-free combination. An immutable XOR history records which accepted
 relations contribute, so combinations need no intermediate GMP products
-or inversions. The final Lanczos matrix still contains only factor-base
-rows. During dependency recovery the history is expanded back to the
-original roots and complete exponents.
+or inversions. The final Lanczos matrix contains only factor-base rows
+and the sign row. During dependency recovery the history is expanded back
+to the original roots and complete exponents.
 
 Accepted originals share a collector-owned arena. Row/exponent pairs use
 four bytes when they fit 27 row bits and five exponent bits; a record uses
 the ordinary wider pairs if either field needs more room. GMP owns the
 root limbs as before. The dedicated 1LP collector and BIDS keep their
-existing paths. This backend does not enable a 3LP policy or splitter.
+existing paths. The 3LP policy and splitter remain separate from the
+ordinary cofactor path.
 
-The 2LP readiness gate uses the complete factor-base row count and the
-usual surplus. It can collect slightly more than the older graph's
-repeated singleton-peeling checks. Logical completed/partial counts are
-separate from the number of retained originals; journal snapshots use the
-logical counts described in [JOURNAL.md](JOURNAL.md).
+For both 2LP and 3LP, the readiness gate counts all factor-base rows, the
+sign row, and the usual surplus. In 2LP this can collect slightly more
+relations than the older graph needed after repeated singleton-peeling
+checks. Logical completed and partial counts are separate from the number
+of retained originals. Version-2 journal snapshots record both as described
+in [JOURNAL.md](JOURNAL.md).
 
 ## How LP and R are selected
 
 Policy bands use bits(N), where N is the input remaining after
 trial division, before the multiplier k is applied.  Each band
 contains `K_L` and `K_R` curves, where `P` is the actual largest
-factor-base prime.  `LP` limits each individual large prime,
-while `R` limits the remaining cofactor after factor-base division.
+factor-base prime.  `LP` limits each individual large prime. In the ordinary
+modes, `R` limits the remaining cofactor after factor-base division.
 
 `LP = floor(K_L × P)`, capped at $2^{38}−1$.  With
 `SIQS_R_DERIVED_FROM_LP`, `R` is the final capped `LP` in smooth/1LP mode, or
@@ -258,18 +322,25 @@ while `R` limits the remaining cofactor after factor-base division.
 smooth/1LP mode, or `floor(K_R × P²)` in 2LP mode.  `R` saturates at 2^64−1.
 Smooth-only profiles use `K_L = 1`.
 
+In 3LP mode, the 2LP formula sets `R2`. Any scale from the policy row
+applies after rounding and capping, with the scaled result capped again.
+`R2` governs the guarded 2LP route. `R3 = LP × P²` caps the residual
+eligible for 3LP screening.
+
 `SIQS_POLICY_LINEAR(base, step, origin)` permits extrapolation from
 its origin.  `SIQS_POLICY_RAMP(beg, end, first_bits, last_bits)` stores
 endpoint values and interpolates linearly between them; extrapolation
 is an error.  The policy table and its comments in [siqs.c](../siqs.c)
 describe the other parameters.
 
-The sieve-hit exponent sets a separate coarse residual allowance,
-raised to at least `2 × R`.  The fine filter uses the final `R`.
+The sieve-hit exponent sets a separate coarse residual allowance. In the
+ordinary modes it is at least `2 × R`, and the fine filter uses `R`. In 3LP
+mode the coarse allowance is at least `2 × R2` and `2 × R3`, and the fine
+filter uses `R3`.
 
 The lower bands have been tuned with these separate K curves.  Settings
 above the end-to-end tested range remain provisional.  Changing factor-base
-size also changes P, and therefore both LP and R.
+size also changes `P`, and therefore `LP` and the residual bounds.
 The four tuning knobs -- factor-base size, sieve interval, `K_L`,
 and `K_R` -- must therefore be considered together, even though their
 policy curves can be edited separately.
@@ -288,9 +359,13 @@ have factors above these bounds.
 
 Run the commands in this section from the repository root.
 
-`make siqs` builds `msiqs` with pthread support when a compile/link probe
-succeeds, otherwise serial-only.  `-t N`, `--threads N`, and `-threads N`
-are equivalent ways to request workers in a threaded build.
+`make siqs` uses a compile/link probe to select pthreads or a serial build.
+A separate probe enables atomics for the residual-first batch counters.
+Threaded builds use a pthread mutex for these counters when atomics are
+unavailable. Manual pthread builds also use a mutex by default.
+Use `CPPFLAGS=-DSIQS_RF_ATOMICS=0` to select the mutex explicitly.
+`-t N`, `--threads N`, and `-threads N` are equivalent ways to request
+workers in a threaded build.
 `make serial` always rebuilds `msiqs` without
 threading.  Remove `msiqs` before rebuilding to return to
 autodetection or after changing compiler settings.

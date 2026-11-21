@@ -288,14 +288,14 @@ static void cofactor_a_search_stages(void) {
   }
   /* Exercise both late-stage examples through the public entry. */
   mpz_set_str(n, "68719477433", 10);
-  factors = gmp_siqs(n, &count, 0, 0);
+  factors = gmp_siqs(n, &count, 0, 0, 0, 0);
   CHECK(count == 2 &&
         ((mpz_cmp_ui(factors[0], 431) == 0 && mpz_cmp_ui(factors[1], 159441943) == 0) ||
          (mpz_cmp_ui(factors[1], 431) == 0 && mpz_cmp_ui(factors[0], 159441943) == 0)));
   gmp_siqs_free(factors, count);
   /* This fixture has three prime factors, not a semiprime. */
   mpz_set_str(n, "137438955233", 10);
-  factors = gmp_siqs(n, &count, 0, 0);
+  factors = gmp_siqs(n, &count, 0, 0, 0, 0);
   CHECK(count == 3); mpz_set_ui(scaled, 1);
   for (i = 0; i < count; i++) {
     CHECK(mpz_cmp_ui(factors[i], 2797) == 0 || mpz_cmp_ui(factors[i], 2819) == 0 ||
@@ -372,7 +372,7 @@ static void cofactor_low_recovery(void) {
              (mpz_cmp(factors[0], q) == 0 && mpz_cmp(factors[1], p) == 0)));
       gmp_siqs_free(factors, count);
     }
-    factors = gmp_siqs(n, &count, 0, 0);
+    factors = gmp_siqs(n, &count, 0, 0, 0, 0);
     CHECK(count == 2 &&
           ((mpz_cmp(factors[0], p) == 0 && mpz_cmp(factors[1], q) == 0) ||
            (mpz_cmp(factors[0], q) == 0 && mpz_cmp(factors[1], p) == 0)));
@@ -416,7 +416,7 @@ static void cofactor_q3_recovery(void) {
         ((mpz_cmp(factors[0], p) == 0 && mpz_cmp(factors[1], q) == 0) ||
          (mpz_cmp(factors[0], q) == 0 && mpz_cmp(factors[1], p) == 0)));
   gmp_siqs_free(factors, count);
-  factors = gmp_siqs(n, &count, 0, 0);
+  factors = gmp_siqs(n, &count, 0, 0, 0, 0);
   CHECK(count == 2 &&
         ((mpz_cmp(factors[0], p) == 0 && mpz_cmp(factors[1], q) == 0) ||
          (mpz_cmp(factors[0], q) == 0 && mpz_cmp(factors[1], p) == 0)));
@@ -467,7 +467,7 @@ static void cofactor_q2_geometry_recovery(void) {
           ((mpz_cmp(factors[0], p) == 0 && mpz_cmp(factors[1], q) == 0) ||
            (mpz_cmp(factors[0], q) == 0 && mpz_cmp(factors[1], p) == 0)));
     gmp_siqs_free(factors, count);
-    factors = gmp_siqs(n, &count, 0, 0);
+    factors = gmp_siqs(n, &count, 0, 0, 0, 0);
     CHECK(count == 2 &&
           ((mpz_cmp(factors[0], p) == 0 && mpz_cmp(factors[1], q) == 0) ||
            (mpz_cmp(factors[0], q) == 0 && mpz_cmp(factors[1], p) == 0)));

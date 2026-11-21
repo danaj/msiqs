@@ -28,7 +28,7 @@ def step(name, command, cwd=ROOT):
 
 
 def splitter_counter_compatibility(data, proof):
-    # Version 1 stores SQUFOF and ECM in words 6 and 7 of the 24-word snapshot.
+    # V2 retains SQUFOF and ECM in words 6 and 7 of the 32-word snapshot.
     # The latter word was the always-zero rho counter in historical journals.
     assert proof['split_ecm'] > 0
     for mode in ('legacy', 'mixed'):
@@ -38,13 +38,13 @@ def splitter_counter_compatibility(data, proof):
             fields = struct.unpack_from('<IIQIIQQQII', changed, at)
             end = at + 56 + fields[3]
             if fields[1] == 3:
-                progress = list(struct.unpack_from('<24Q', changed, at + 56))
+                progress = list(struct.unpack_from('<32Q', changed, at + 56))
                 progress[3] += 7
                 progress[6] += 7
                 if mode == 'legacy':
                     progress[6] += progress[7]
                     progress[7] = 0
-                struct.pack_into('<24Q', changed, at + 56, *progress)
+                struct.pack_into('<32Q', changed, at + 56, *progress)
                 crc = zlib.crc32(changed[at + 56:end], zlib.crc32(changed[at:at + 52]))
                 struct.pack_into('<I', changed, at + 52, crc)
             at = end
@@ -114,10 +114,10 @@ data=path.read_bytes()
 step('attempt-replay',[str(RESULTS/'journal-attempts'),str(path)])
 assert path.read_bytes()==data
 step('attempt-info',[sys.executable,str(BUILD/'tools/journal-info.py'),'--json',str(path)])
-step('build-graph',['cc','-O2','-DPSIQS','-pthread',
-                    '-o',str(RESULTS/'journal-graph'),str(FIXTURES/'journal-graph.c'),
+step('build-graph',['perl','tools/build-siqs.pl','--cflags','-O2',
+                    '--output',str(RESULTS/'journal-graph'),str(FIXTURES/'journal-graph.c'),
                     str(BUILD/'lanczos.c'),str(BUILD/'pr32_iter.c'),
-                    str(ROOT/'tinyecm64.c'),'-lgmp','-lm'])
+                    str(ROOT/'tinyecm64.c')],BUILD)
 path=RESULTS/'graph.journal'
 if path.exists():path.unlink()
 proof=[]

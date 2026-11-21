@@ -17,10 +17,11 @@
 #ifndef SIQS_JOURNAL_BATCH_BYTES
 # define SIQS_JOURNAL_BATCH_BYTES 262144U
 #endif
+#define SJ_TLP_BATCH_BYTES (16U * SIQS_JOURNAL_BATCH_BYTES)
 #define SJ_MAX_FRAME (64U * 1024U * 1024U)
 #define SJ_HEADER 56U
 #define SJ_MAGIC UINT32_C(0x4b4c424a)
-#define SJ_VERSION 1U
+#define SJ_VERSION 2U
 enum { SJ_INPUT = 1, SJ_CONTEXT, SJ_BATCH, SJ_ATTEMPT_END, SJ_RETURN, SJ_JOB_END };
 enum { SJ_RELATION = 1, SJ_FAMILY };
 static const unsigned char sj_preamble[16] = {
@@ -35,7 +36,7 @@ struct siqs_journal_t {
   FILE *file;
   char *path;
   uint64_t sequence, append_offset, families;
-  uint64_t run, mono_start;
+  uint64_t run, mono_start, last_checkpoint;
   int have_run, writing_run, clock_started;
 #ifdef _WIN32
   uint64_t clock_frequency;
@@ -289,7 +290,7 @@ static void sj_write(siqs_journal_t *j, uint32_t type, uint32_t count, const sj_
   sj_position(j);
   now = sj_clock_us(j, 1);
   if (!j->clock_started) {
-    j->mono_start = now; j->clock_started = 1;
+    j->mono_start = now; j->last_checkpoint = now; j->clock_started = 1;
   }
   if (!j->writing_run) {
     if (j->have_run && j->run == UINT64_MAX) sj_error(j, "run counter exhausted");
@@ -321,13 +322,20 @@ static void sj_expect_text(siqs_journal_t *j, const char *text) {
       sj_error(j, "invalid or incomplete ASCII header");
 }
 static void sj_read_ascii(siqs_journal_t *j, mpz_srcptr n) {
-  char version[32];
   sj_buffer digits = {NULL, 0, 0};
+  char expected_version[32], stored_version[32];
   mpz_t stored;
   int ch;
-  sj_expect_text(j, "MPUSIQJ\n");
-  snprintf(version, sizeof(version), "Version: %u\n", (unsigned)SJ_VERSION);
-  sj_expect_text(j, version);
+  sj_expect_text(j, "MPUSIQJ\nVersion: ");
+  snprintf(expected_version, sizeof(expected_version), "%u\n", (unsigned)SJ_VERSION);
+  if (fgets(stored_version, sizeof(stored_version), j->file) == NULL ||
+      strcmp(stored_version, expected_version) != 0) {
+    char message[96];
+    snprintf(message, sizeof(message),
+             "unsupported journal format version; this release uses version %u",
+             (unsigned)SJ_VERSION);
+    sj_error(j, message);
+  }
   sj_expect_text(j, "Byte-order: little-endian\nN: ");
   while ((ch = fgetc(j->file)) != '\n') {
     unsigned char digit;
@@ -398,11 +406,12 @@ siqs_journal_t *gmp_siqs_journal_open(const char *path, mpz_srcptr n) {
     j->reading = 1;
     sj_read_ascii(j, n);
     if (fread(preamble, 1, 16, j->file) != 16 || memcmp(preamble, sj_preamble, 16) != 0)
-      sj_error(j, "invalid or incomplete binary header");
+      sj_error(j, "invalid or unsupported journal version/header");
     if (!sj_peek(j) || j->frame_type != SJ_INPUT || j->frame_count != 1)
       sj_error(j, "missing input header");
     mpz_init(stored); r = sj_frame_reader(j);
-    sj_get_mpz(&r, stored, SJ_MAX_FRAME); sj_done(&r);
+    sj_get_mpz(&r, stored, SJ_MAX_FRAME);
+    sj_done(&r);
     if (mpz_cmp(stored, j->original) != 0)
       sj_error(j, "ASCII and binary input headers do not match");
     mpz_clear(stored); sj_consume(j);
@@ -426,7 +435,8 @@ siqs_journal_t *gmp_siqs_journal_open(const char *path, mpz_srcptr n) {
                     (unsigned)SJ_VERSION, n) < 0)
       sj_error(j, "cannot write ASCII header");
     if (fwrite(sj_preamble, 1, 16, j->file) != 16) sj_error(j, "cannot write file header");
-    sj_mpz(&b, n); sj_write(j, SJ_INPUT, 1, &b); free(b.data);
+    sj_mpz(&b, n);
+    sj_write(j, SJ_INPUT, 1, &b); free(b.data);
   }
   return j;
 }
@@ -449,21 +459,29 @@ void gmp_siqs_journal_close(siqs_journal_t *j) {
  X(sieve_start) X(sieve_free_units) X(sieve_start_prime_floor) X(fb_floor) \
  X(relation_extra) X(multiplier_refine_divisor) X(fixed_half_interval) \
  X(sieve_initial) X(stage1_bias) X(sieve_raw_scores) X(sieve_saturating) \
- X(sieve_score_bound) X(large_prime_bound) X(smooth_bound)
+ X(sieve_score_bound) X(large_prime_bound) X(smooth_bound) X(tlp_cutoff)
 #define SJ_PARAMETER_D(X) \
  X(lp_multiplier) X(residual_multiplier) X(sieve_start_index_exponent) \
  X(fb_coefficient) X(interval_scale) X(sieve_hit_exponent) \
- X(sieve_hit_bound_nominal) X(sieve_hit_residual_multiplier) X(sieve_hit_bound) X(log_scale)
+ X(sieve_hit_bound_nominal) X(sieve_hit_residual_multiplier) X(sieve_hit_bound) X(log_scale) X(tlp_smooth_bound)
 #define SJ_COUNTERS(X) \
  X(total_candidates) X(split_attempts) X(split_square) X(split_siqs) \
- X(split_squfof) X(split_ecm) X(split_fail) X(split_rejected)
+ X(split_squfof) X(split_ecm) X(split_fail) X(split_rejected) \
+ X(tlp_candidates) X(tlp_batches) X(tlp_gcd_one) X(tlp_gcd_proper) X(tlp_gcd_whole) \
+ X(tlp_completed) X(tlp_rejected)
+#define SJ_COUNT_COUNTER(field) + 1
+enum { SJ_COUNTER_COUNT = 0 SJ_COUNTERS(SJ_COUNT_COUNTER) };
+#undef SJ_COUNT_COUNTER
 static void sj_context(siqs_ctx_t *ctx, sj_buffer *b) {
   uint32_t i; size_t name = strlen(ctx->params.policy_name);
+  static const char policy_tag[] = ";tlp-policy-v1:r1:g1:e0:b0000000000000000";
+  size_t tag_size = ctx->tlp_policy != NULL ? sizeof(policy_tag) - 1U : 0;
   if (sizeof(double) != sizeof(uint64_t) || DBL_MANT_DIG != 53 || DBL_MAX_EXP != 1024)
     croak("SIQS journal: binary64 doubles required by this journal format");
   sj_mpz(b, ctx->n); sj_u64(b, ctx->multiplier);
-  sj_u32(b, SIQS_PACKED_FACTOR_ROW_BITS); sj_u32(b, (uint32_t)name);
+  sj_u32(b, SIQS_PACKED_FACTOR_ROW_BITS); sj_u32(b, (uint32_t)(name + tag_size));
   sj_bytes(b, ctx->params.policy_name, name);
+  if (tag_size != 0) sj_bytes(b, policy_tag, tag_size);
 #define SJ_PUT_U(field) sj_u64(b, (uint64_t)ctx->params.field);
   SJ_PARAMETER_U(SJ_PUT_U)
 #undef SJ_PUT_U
@@ -483,15 +501,21 @@ static void sj_context(siqs_ctx_t *ctx, sj_buffer *b) {
 static void sj_flush(siqs_ctx_t *ctx) {
   siqs_journal_t *j = ctx->journal; sj_buffer b = {NULL, 0, 0};
   if (j == NULL || j->replaying || j->batch.size == 0) return;
+  /* The coordinator owns this accepted graph. Residual jobs have private
+   * state and need not finish to checkpoint it. Unpublished work is omitted
+   * and abandoned on restart, as are unfinished sieve worker buffers. */
   sj_u64(&b, j->families); sj_u64(&b, *ctx->journal_poly_count);
 #define SJ_PUT_COUNTER(field) sj_u64(&b, ctx->field);
   SJ_COUNTERS(SJ_PUT_COUNTER)
 #undef SJ_PUT_COUNTER
   sj_u64(&b, ctx->la_rng.state); sj_u64(&b, ctx->cofactor_rng.state);
   sj_u64(&b, ctx->poly_rng.state);
-  sj_u64(&b, siqs_relation_count(ctx));
-  sj_u64(&b, (uint64_t)siqs_partial_count(ctx));
+  sj_u64(&b, ctx->full_count);
+  sj_u64(&b, ctx->params.max_large_primes == 3
+              ? (uint64_t)ctx->raw_count + ctx->one_lp.count
+              : (uint64_t)siqs_partial_count(ctx));
   sj_u64(&b, ctx->matrix_next_target);
+  sj_u64(&b, siqs_relation_count(ctx));
   {
     unsigned i;
     for (i = 0; i < 8; i++) sj_u64(&b, ctx->journal_cycles[i]);
@@ -499,10 +523,24 @@ static void sj_flush(siqs_ctx_t *ctx) {
   sj_bytes(&b, j->batch.data, j->batch.size);
   sj_write(j, SJ_BATCH, j->events, &b); free(b.data);
   j->batch.size = 0; j->events = 0;
+  if (ctx->params.max_large_primes == 3)
+    j->last_checkpoint = sj_clock_us(j, 1);
+}
+/* TLP rows arrive in FB/LP batches. Checkpoint between publications using
+ * a 4 MiB byte budget and a 20-second time target for sparse output.
+ * Ordinary collection keeps its original byte and event limits. */
+static int sj_batch_due(siqs_ctx_t *ctx) {
+  siqs_journal_t *j = ctx->journal;
+  if (ctx->params.max_large_primes != 3)
+    return j->batch.size >= SIQS_JOURNAL_BATCH_BYTES || j->events >= 256U;
+  if (j->batch.size >= SJ_TLP_BATCH_BYTES) return 1;
+  return j->batch.size != 0 && j->clock_started &&
+      sj_clock_us(j, 1) - j->last_checkpoint >= UINT64_C(20000000);
 }
 static void sj_maybe_flush(siqs_ctx_t *ctx) {
   siqs_journal_t *j = ctx->journal;
-  if (!j->replaying && (j->batch.size >= SIQS_JOURNAL_BATCH_BYTES || j->events >= 256U))
+  if (ctx->tlp != NULL && ctx->tlp->flushing) return;
+  if (!j->replaying && sj_batch_due(ctx))
     sj_flush(ctx);
 }
 static void siqs_journal_full(siqs_ctx_t *ctx, uint32_t length) {
@@ -522,17 +560,20 @@ static void siqs_journal_family(siqs_ctx_t *ctx, const siqs_poly_t *poly) {
   sj_bytes(&j->batch, event, sizeof(event));
   for (i = 0; i < poly->q_count; i++) sj_u32(&j->batch, poly->a_index[i]);
   j->families++; j->events++;
-  if (j->batch.size >= SIQS_JOURNAL_BATCH_BYTES || j->events >= 256U) sj_flush(ctx);
+  if (sj_batch_due(ctx)) sj_flush(ctx);
 }
 static void siqs_journal_relation(siqs_ctx_t *ctx, const siqs_raw_relation_t *r) {
   siqs_journal_t *j = ctx->journal;
   sj_buffer *b = &j->batch;
   uint32_t i, previous = 0;
-  unsigned labels = r->lp2 == 1 ? 0U : r->lp1 == 1 ? 1U : 2U;
+  unsigned labels = r->lp3 > 1 ? 3U : r->lp2 == 1 ? 0U : r->lp1 == 1 ? 1U : 2U;
   size_t size, written = 0, fixed;
   unsigned char *p;
   if (j->replaying) return;
-  if (r->lp1 == 0 || r->lp1 > r->lp2 || r->lp2 > ctx->params.large_prime_bound)
+  if (r->lp3 == 0 || r->lp1 == 0 || r->lp1 > r->lp2 ||
+      r->lp2 > ctx->params.large_prime_bound ||
+      (labels == 3U && (r->lp1 <= 1 || r->lp3 < r->lp2 ||
+                       r->lp3 > ctx->params.large_prime_bound)))
     sj_error(j, "invalid large-prime labels");
   size = mpz_sgn(r->y) ? (mpz_sizeinbase(r->y, 2) + 7U) / 8U : 0;
   if (mpz_sgn(r->y) < 0 || size > SJ_MAX_FRAME - 26U)
@@ -545,8 +586,9 @@ static void siqs_journal_relation(siqs_ctx_t *ctx, const siqs_raw_relation_t *r)
   sj_reserve(b, fixed + 6U * r->nfactors);
   p = b->data + b->size;
   *p++ = SJ_RELATION; *p++ = (unsigned char)labels;
-  if (labels == 2U) p = sj_put_uint(p, r->lp1, j->lp_bytes);
+  if (labels >= 2U) p = sj_put_uint(p, r->lp1, j->lp_bytes);
   if (labels != 0) p = sj_put_uint(p, r->lp2, j->lp_bytes);
+  if (labels == 3U) p = sj_put_uint(p, r->lp3, j->lp_bytes);
   p = sj_put_uint(p, (uint32_t)size, 4);
   if (size != 0) mpz_export(p, &written, 1, 1, 1, 0, r->y);
   if (written != size) sj_error(j, "magnitude size mismatch");
@@ -613,7 +655,7 @@ static void sj_replay_batch(siqs_ctx_t *ctx, siqs_poly_t *poly, uint64_t *famili
   uint32_t event;
   mpz_t y;
   /* Counter snapshots precede events, but are applied after graph replay. */
-  uint64_t counters[8], la, cof, poly_rng, full, partials, target, cycles[8];
+  uint64_t counters[SJ_COUNTER_COUNT], la, cof, poly_rng, full, partials, target, useful, cycles[8];
   unsigned k = 0;
 #define SJ_GET_COUNTER(field) counters[k++] = sj_get64(&r);
   SJ_COUNTERS(SJ_GET_COUNTER)
@@ -621,6 +663,7 @@ static void sj_replay_batch(siqs_ctx_t *ctx, siqs_poly_t *poly, uint64_t *famili
   la = sj_get64(&r); cof = sj_get64(&r); poly_rng = sj_get64(&r);
   if (la == 0 || cof == 0 || poly_rng == 0) sj_error(j, "invalid zero RNG state");
   full = sj_get64(&r); partials = sj_get64(&r); target = sj_get64(&r);
+  useful = sj_get64(&r);
   for (k = 0; k < 8; k++) cycles[k] = sj_get64(&r);
   mpz_init(y);
   if (polys < *polynomials || polys > siqs_polynomial_limit(&ctx->params) ||
@@ -644,17 +687,18 @@ static void sj_replay_batch(siqs_ctx_t *ctx, siqs_poly_t *poly, uint64_t *famili
       j->families++;
     } else if (kind == SJ_RELATION) {
       unsigned labels = info;
-      uint64_t lp1, lp2;
+      uint64_t lp1, lp2, lp3;
       uint32_t count; siqs_factor_t *factors; siqs_raw_relation_t *raw;
-      if (labels > 4U) sj_error(j, "invalid large-prime count");
-      if (labels > 2U) sj_error(j, "3LP/4LP relation replay is not supported");
+      if (labels > 3U) sj_error(j, "invalid or unsupported large-prime count");
       if (labels > ctx->params.max_large_primes)
         sj_error(j, "relation exceeds the context's large-prime count");
-      lp1 = labels == 2U ? sj_get_uint(&r, j->lp_bytes) : 1;
+      lp1 = labels >= 2U ? sj_get_uint(&r, j->lp_bytes) : 1;
       lp2 = labels != 0 ? sj_get_uint(&r, j->lp_bytes) : 1;
+      lp3 = labels == 3U ? sj_get_uint(&r, j->lp_bytes) : 1;
       sj_get_mpz(&r, y, (mpz_sizeinbase(ctx->n, 2) + 7U) / 8U);
       if (mpz_cmp(y, ctx->n) >= 0 || lp1 > lp2 || lp2 > ctx->params.large_prime_bound ||
-          (labels == 1U && lp2 <= 1) || (labels == 2U && lp1 <= 1))
+          (labels == 1U && lp2 <= 1) || (labels >= 2U && lp1 <= 1) ||
+          (labels == 3U && (lp3 < lp2 || lp3 > ctx->params.large_prime_bound)))
         sj_error(j, "invalid relation magnitude or large-prime labels");
       count = sj_get32(&r);
       if (count > ctx->params.fb_size + 1U || count > r.left)
@@ -671,21 +715,29 @@ static void sj_replay_batch(siqs_ctx_t *ctx, siqs_poly_t *poly, uint64_t *famili
         factors[i].row = previous + delta;
         factors[i].exponent = exponent;
       }
-      raw = siqs_raw_relation_new(ctx, y, factors, count, lp1, lp2);
+      raw = siqs_raw_relation_new3(ctx, y, factors, count, lp1, lp2, lp3);
       free(factors); siqs_accept_raw_relation(ctx, raw);
     } else sj_error(j, "unknown relation-batch event");
   }
   mpz_clear(y); sj_done(&r);
-  if (partials != (uint64_t)siqs_partial_count(ctx) ||
+  if (partials != (ctx->params.max_large_primes == 3
+                    ? (uint64_t)ctx->raw_count + ctx->one_lp.count
+                    : (uint64_t)siqs_partial_count(ctx)) ||
       target > UINT32_MAX ||
       (ctx->lp_combiner == NULL && memcmp(cycles, ctx->journal_cycles, sizeof(cycles)) != 0))
     sj_error(j, "graph statistics do not match replayed relations");
-  if (full != siqs_relation_count(ctx)) {
+  /* Version 2 stores retained originals separately from useful LP-free
+   * combinations. Older ordinary-mode writers used a materialized graph,
+   * so their stored and useful counts coincide. */
+  if (full != ctx->full_count &&
+      !(ctx->lp_combiner != NULL && ctx->params.max_large_primes != 3 && full == useful))
+    sj_error(j, "stored relation count does not match replayed relations");
+  if (useful != siqs_relation_count(ctx)) {
     /* The old collector discards a cycle when an LP inverse fails. The LP
      * kernel retains it and can discover the same proper divisor earlier.
      * Permit that difference only after verifying an actual split. */
     if (ctx->lp_combiner == NULL || !ctx->factor_found ||
-        ctx->result->count < 2U || full > siqs_relation_count(ctx))
+        ctx->result->count < 2U || useful > siqs_relation_count(ctx))
       sj_error(j, "graph statistics do not match replayed relations");
     siqs_verify_partition(ctx->original_n, ctx->result);
   }
@@ -698,7 +750,7 @@ static void sj_replay_batch(siqs_ctx_t *ctx, siqs_poly_t *poly, uint64_t *famili
       if (cycles[k] > UINT64_MAX - total) sj_error(j, "cycle counter overflow");
       total += cycles[k];
     }
-    if (total != full) sj_error(j, "cycle histogram does not match relation count");
+    if (total != useful) sj_error(j, "cycle histogram does not match relation count");
     memcpy(ctx->journal_cycles, cycles, sizeof(cycles));
   }
   ctx->matrix_next_target = (uint32_t)target;
@@ -739,7 +791,7 @@ static int sj_attach(siqs_ctx_t *ctx, siqs_poly_t *poly, uint64_t *families,
     sj_consume(j);
   } else sj_write(j, SJ_CONTEXT, 1, &b);
   free(b.data); j->replaying = 1;
-  relations_before = ctx->accepted_smooth + ctx->accepted_one_lp + ctx->accepted_two_lp;
+  relations_before = ctx->accepted_smooth + ctx->accepted_one_lp + ctx->accepted_two_lp + ctx->accepted_three_lp;
   while (sj_peek(j)) {
     if (j->frame_type == SJ_BATCH) sj_replay_batch(ctx, poly, families, polynomials);
     else if (j->frame_type == SJ_ATTEMPT_END) { sj_apply_end(ctx); ended = 1; break; }
@@ -748,7 +800,7 @@ static int sj_attach(siqs_ctx_t *ctx, siqs_poly_t *poly, uint64_t *families,
   j->replaying = 0;
   if (ctx->verbose > 0 && existing) {
     printf("# siqs journal replayed %llu accepted relations, %llu A families%s\n",
-      (unsigned long long)(ctx->accepted_smooth + ctx->accepted_one_lp + ctx->accepted_two_lp - relations_before),
+      (unsigned long long)(ctx->accepted_smooth + ctx->accepted_one_lp + ctx->accepted_two_lp + ctx->accepted_three_lp - relations_before),
       (unsigned long long)*families, ended ? " (attempt complete)" : "; appending new work");
     fflush(stdout);
   }
@@ -760,11 +812,14 @@ static void sj_begin_attempt(siqs_ctx_t *ctx) {
   /* Time new work after replay, including the first batch. This only starts
    * the run clock: it neither appends nor consumes a run number, and later
    * recovery attempts/cofactors retain the same time origin. */
-  j->mono_start = sj_clock_us(j, 1); j->clock_started = 1;
+  j->mono_start = sj_clock_us(j, 1); j->last_checkpoint = j->mono_start; j->clock_started = 1;
 }
 static void sj_end_attempt(siqs_ctx_t *ctx) {
   siqs_journal_t *j = ctx->journal; sj_buffer b = {NULL, 0, 0};
   if (j == NULL) return;
+  /* Attempt completion must include pending results; periodic checkpoints
+   * only save accepted work and leave residual jobs running. */
+  siqs_tlp_flush(ctx);
   sj_flush(ctx); sj_u32(&b, (uint32_t)ctx->factor_found);
   sj_partition(&b, ctx->original_n, ctx->result->values, ctx->result->count);
   sj_write(j, SJ_ATTEMPT_END, 1, &b); free(b.data);

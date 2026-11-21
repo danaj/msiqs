@@ -11,6 +11,7 @@ static void bids_fixture_open(siqs_ctx_t *ctx, siqs_factor_array_t *result,
   ctx->fb = (siqs_fb_t *)check_allocate(fb, sizeof(*ctx->fb));
   ctx->factor_counts = (uint32_t *)check_allocate(fb + 1U, sizeof(uint32_t));
   ctx->factor_touched = (uint32_t *)check_allocate(fb + 1U, sizeof(uint32_t));
+  ctx->factor_row_alloc = fb + 1U;
   siqs_factor_array_init(result, ctx->n); ctx->result = result;
   ctx->use_bids = 1;
   ctx->bids_cap = fb + 1U + SIQS_BIDS_EXTRA_RELS;

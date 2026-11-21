@@ -36,10 +36,35 @@ To request eight workers and periodic progress reports:
 The Makefile detects pthread support automatically.  The default is one
 factoring thread, and very small inputs may stay serial even when more
 are requested.  `-v` prints setup and final summaries, `-vv` adds progress.
+`-vvv` also reports interval deltas for useful full relations and accepted
+0LP, 1LP, 2LP and 3LP records.
 With no integers on the command line, `msiqs` reads whitespace or newline
 separated inputs from stdin.
 See [build and API notes](docs/IMPLEMENTATION.md#build-and-api-notes) for
 compiler options and serial-only builds.
+
+Three-large-prime collection is selected automatically for post-trial
+cofactors of 361 bits and larger. Smaller cofactors use the ordinary policies.
+The command-line options override that selection:
+
+```sh
+./msiqs --2lp -t 8 -vv INTEGER
+./msiqs --3lp -t 8 -vv INTEGER
+```
+
+`--2lp` forces the ordinary policies. `--3lp` selects the separate `3lp_...`
+policy table for post-trial cofactors of 270 through 512 bits. Uncovered
+sizes use the ordinary policies. Recovery policies and internal
+cofactor-splitter calls retain their existing selection.
+
+3LP uses batch GCDs and shared large-prime combination before constructing
+the factor-base matrix. Pthread builds enable residual-first screening by
+default and recover exact factor vectors only for accepted records.
+The batch cutoff trades some relation yield for memory.
+3LP can use more memory and take longer than ordinary 2LP collection.
+`make check-3lp` runs the component checks. `make check-3lp-integration` also
+factors a 270-bit semiprime with pthreads, interrupts and resumes a journal,
+and verifies every saved relation and completed replay.
 
 To save relation collection and resume it later, use an optional journal:
 
@@ -51,6 +76,9 @@ python3 tools/journal-info.py --follow --eta job.journal
 
 The [journal guide](docs/JOURNAL.md) describes restart behavior, inspection and
 the file format. Journalling is off unless requested.
+Use the same policy selection when restarting a journal: if the initial
+command used `--2lp` or `--3lp`, repeat that option on restart. Journals are
+release-specific; this release writes and reads format version 2 only.
 
 ### Embedding in C
 
@@ -118,9 +146,11 @@ of a generic factoring package, as in a general-purpose factoring routine, or in
 
 ## Checks and license
 
-`make check` runs the SIQS checks. Additional targets are
+`make check` runs the SIQS checks, including the shared large-prime combiner
+and the 3LP component checks. Additional targets are
 `make check-embedded`, `make check-pr32`, `make check-autotune`,
-and `make check-journal`.  Developer checks use core Perl and Python 3.
+`make check-journal`, and `make check-3lp-integration`. Developer checks use
+core Perl and Python 3.
 
 Current sources are [MIT licensed](LICENSE). See [source history](docs/history/README.md)
 for the extraction, original commit maps, and historical notices.

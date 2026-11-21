@@ -13,7 +13,7 @@ import zlib
 import sys
 sys.dont_write_bytecode = True
 from _support import ROOT, RESULTS, EXE
-PREAMBLE = b'MPUSIQJ\0' + struct.pack('<II', 1, 0x01020304)
+PREAMBLE = b'MPUSIQJ\0' + struct.pack('<II', 2, 0x01020304)
 FRAME = struct.Struct('<IIQIIQQQII')
 SMALL = 1000000007 * 1000000009
 ONE = ((1 << 89) - 1) * ((1 << 107) - 1)
@@ -27,7 +27,7 @@ def frames(data, partial=False):
             return []
         raise AssertionError('short ASCII or binary prefix')
     lines = data[:end+4].decode('ascii').splitlines()
-    assert len(lines) >= 5 and lines[:3] == ['MPUSIQJ', 'Version: 1', 'Byte-order: little-endian']
+    assert len(lines) >= 5 and lines[:3] == ['MPUSIQJ', 'Version: 2', 'Byte-order: little-endian']
     assert lines[3].startswith('N: ') and lines[3][3:].isdigit() and lines[-1] == '--'
     number = int(lines[3][3:])
     binary = end+4
@@ -66,13 +66,13 @@ def compact_relations(data, parsed):
             at+=4+nbytes+12
             namebytes=struct.unpack_from('<I',data,at)[0]
             at+=4+namebytes
-            params=struct.unpack_from('<23Q',data,at)
-            bound=params[-2]
+            params=struct.unpack_from('<24Q',data,at)
+            bound=params[21]
             width=max(1,(bound.bit_length()+7)//8)
             fb_size=params[4]
         if kind!=3:
             continue
-        at+=192
+        at+=256
         def varint():
             nonlocal at
             value=0;shift=0
@@ -261,7 +261,7 @@ def main():
 
         n, data, parsed = journals['two-lp']
         ascii_end = data.index(b'\n--\n')+4
-        assert data[:ascii_end] == f'MPUSIQJ\nVersion: 1\nByte-order: little-endian\nN: {n}\n--\n'.encode('ascii')
+        assert data[:ascii_end] == f'MPUSIQJ\nVersion: 2\nByte-order: little-endian\nN: {n}\n--\n'.encode('ascii')
         check('five-line readable ASCII prefix and matching binary INPUT')
 
         path = tmp/'header-notes.journal'
@@ -339,7 +339,7 @@ def main():
         check('binary INPUT cannot disagree with the ASCII input')
 
         for label, ascii_old, ascii_new, binary_offset in (
-                ('version', b'Version: 1\n', b'Version: 2\n', 8),
+                ('version', b'Version: 2\n', b'Version: 3\n', 8),
                 ('byte-order', b'Byte-order: little-endian\n', b'Byte-order: big-endian\n', 12)):
             for side in ('ascii', 'binary'):
                 path = tmp/f'bad-{side}-{label}.journal'

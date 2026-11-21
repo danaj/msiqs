@@ -7,16 +7,19 @@ use File::Spec;
 use FindBin qw($Bin);
 use Getopt::Long qw(GetOptions);
 
-# Read the primary policy, not a saved copy of its values.  The size formulas
+# Read the selected policy table from source. The size formulas
 # below mirror siqs_select_parameters; no factoring or module build is needed.
-my ($details, $describe, $exact, $help, $header_path);
+my ($details, $describe, $exact, $help, $header_path, $tlp, $two_lp);
 Getopt::Long::Configure(qw(no_auto_abbrev no_ignore_case));
 GetOptions('detail|details' => \$details,
            'describe|verbose|v' => \$describe,
            'exact' => \$exact,
+           '2lp' => \$two_lp,
+           '3lp' => \$tlp,
            'help' => \$help,
            'header=s' => \$header_path) or usage(2);
 usage(0) if $help;
+usage(2) if $tlp && $two_lp;
 usage(2) if @ARGV > 1;
 my $source_path = shift @ARGV // File::Spec->catfile($Bin, '..', 'siqs.c');
 $header_path //= File::Spec->catfile(dirname($source_path), 'siqs.h');
@@ -47,22 +50,64 @@ die "unrecognized SIQS size formulas in $source_path\n"
 
 my ($struct) = $source =~
   /typedef\s+struct\s*\{([^{}]*)\}\s*siqs_policy_band_t\s*;/s;
+my $table = $tlp ? 'siqs_tlp_policy_bands' : 'siqs_policy_bands';
 my ($array) = $source =~
-  /\bsiqs_policy_bands\s*\[\s*\]\s*=\s*\{(.*?)\}\s*;/s;
-die "cannot find siqs_policy_band_t and siqs_policy_bands in $source_path\n"
+  /\b\Q$table\E\s*\[\s*\]\s*=\s*\{(.*?)\}\s*;/s;
+die "cannot find siqs_policy_band_t and $table in $source_path\n"
   unless defined($struct) && defined($array);
+my ($cutoff_numerator, $cutoff_denominator);
+if ($tlp) {
+  # These symbolic bounds need the actual FB prime P. Check the formulas
+  # before describing them, just as for the size formulas above.
+  my $bounds = $source;
+  my $bounds_path = $source_path;
+  if ($source =~ /\bsiqs_tlp_set_bounds\s*\(\s*ctx\s*\)\s*;/) {
+    $bounds_path = File::Spec->catfile(dirname($source_path), 'siqs_3lp_inc.c');
+    $bounds = read_source($bounds_path);
+  }
+  $bounds =~ s/\s+//g;
+  die "unrecognized TLP bound formulas in $bounds_path\n"
+    unless index($bounds, 'siqs_mpz_set_u64(ctx->tlp_upper,p->large_prime_bound);' .
+      ('mpz_mul_ui(ctx->tlp_upper,ctx->tlp_upper,(unsignedlong)pmax);' x 2)) >= 0 &&
+      index($bounds, 'mpz_root(root,ctx->tlp_upper,3);' .
+      'mpz_mul_ui(root,root,SIQS_TLP_CUTOFF_NUMERATOR);' .
+      'mpz_fdiv_q_ui(root,root,SIQS_TLP_CUTOFF_DENOMINATOR);') >= 0;
+  $cutoff_numerator = numeric('SIQS_TLP_CUTOFF_NUMERATOR');
+  $cutoff_denominator = numeric('SIQS_TLP_CUTOFF_DENOMINATOR');
+  die "invalid TLP cutoff fraction\n"
+    unless $cutoff_numerator > 0 && int($cutoff_numerator) == $cutoff_numerator &&
+           $cutoff_denominator > 0 && int($cutoff_denominator) == $cutoff_denominator;
+}
 my @fields;
 for my $field (split /;/, $struct) {
   next unless $field =~ /\S/;
   $field =~ /(\w+)\s*$/ or die "unrecognized band field: $field\n";
   push @fields, $1;
 }
+my %field_index = map { $fields[$_] => $_ } 0 .. $#fields;
+my $required_fields = @fields;
+$required_fields -= 3
+  if join(',', @fields[-3 .. -1]) eq 'fb_scale,lp_scale,r2_scale';
 my @bands;
 for my $row (split_top_level($array)) {
   $row =~ /^\s*\{(.*)\}\s*$/s or die "unrecognized band row: $row\n";
-  my @values = split_top_level($1);
-  die "band row has " . @values . " values, expected " . @fields . "\n"
-    unless @values == @fields;
+  my (@values, $next);
+  $next = 0;
+  for my $value (split_top_level($1)) {
+    # C permits designated overrides after positional initializers. Any
+    # following positional value continues at the next field.
+    if ($value =~ /^\.(\w+)\s*=\s*(.*)$/s) {
+      die "unknown band field: $1\n" unless exists $field_index{$1};
+      ($next, $value) = ($field_index{$1}, $2);
+    }
+    die "too many values in band row\n" if $next >= @fields;
+    $values[$next++] = $value;
+  }
+  for my $index (0 .. $#fields) {
+    next if defined $values[$index];
+    die "missing band field: $fields[$index]\n" if $index < $required_fields;
+    $values[$index] = 0;  # Omitted optional scales have C's zero default.
+  }
   my %band;
   for my $index (0 .. $#fields) {
     my $value = $values[$index];
@@ -88,34 +133,45 @@ for my $row (split_top_level($array)) {
   die "invalid bit range in $band{name}\n"
     unless $band{first_bits} >= 1 && $band{last_bits} >= $band{first_bits};
   die "unsupported LP count in $band{name}\n"
-    unless $band{production_large_primes} == 1 ||
-           $band{production_large_primes} == 2;
+    unless ($tlp ? $band{production_large_primes} == 3
+                 : $band{production_large_primes} == 1 ||
+                   $band{production_large_primes} == 2);
   push @bands, \%band;
 }
-die "no production bands found\n" unless @bands;
+die "no bands found in $table\n" unless @bands;
 
-my @headings = ('bits', 'type', 'q', 'LP', 'M', 'FB', 'res');
+my @headings = $tlp ? ('bits', 'q', 'M', 'FB', 'LP', 'R2')
+                    : ('bits', 'type', 'q', 'LP', 'M', 'FB', 'res');
 push @headings, ('bias', 'free', 'pmin', 'rel +') if $details;
+push @headings, ('FBx', 'LPx', 'R2x') if $tlp && $details;
 my @rows;
 for my $band (@bands) {
   my ($first, $last) = @{$band}{qw(first_bits last_bits)};
   my @sizes = map { sizes_at($band, $_) } ($first, $last);
   my ($lp, $residual, $type);
-  my @k = map { curve_at($band->{k_l}, $_) } ($first, $last);
+  my @k = map { curve_at($band->{k_l}, $_) * policy_scale($band, 'lp_scale') }
+          ($first, $last);
   die "invalid K_L in $band->{name}\n" if grep { $_ < 1 } @k;
-  $type = $band->{production_large_primes} == 2 ? '2LP'
+  $type = $band->{production_large_primes} == 3 ? '3LP'
+        : $band->{production_large_primes} == 2 ? '2LP'
         : $k[0] == 1 && $k[1] == 1 ? 'smooth' : '1LP';
-  @k = round_range_vals(@k);  # Don't show fractional P values
+  @k = round_range_vals(@k) unless $tlp;
   $lp = coefficient_range('P', @k);
   if (!ref($band->{k_r}) && $band->{k_r} eq 'derived') {
-    $residual = $type eq '2LP' ? 'LP*P' : 'LP';
+    $residual = $band->{production_large_primes} >= 2 ? 'LP*P' : 'LP';
   } else {
     my @r = map { curve_at($band->{k_r}, $_) } ($first, $last);
     die "invalid K_R in $band->{name}\n" if grep { $_ <= 0 } @r;
-    @r = round_range_vals(@r);  # Don't show fractional P values
-    $residual = coefficient_range($type eq '2LP' ? 'P^2' : 'P', @r);
+    @r = round_range_vals(@r) unless $tlp;
+    $residual = coefficient_range($band->{production_large_primes} >= 2 ? 'P^2' : 'P', @r);
   }
-  my @row = (sprintf('%3d-%-3d', $first, $last), $type, $band->{q_count},
+  my $r2_scale = policy_scale($band, 'r2_scale');
+  $residual = sprintf('%.6g*(%s)', $r2_scale, $residual) if $r2_scale != 1;
+  my @row = $tlp
+    ? (sprintf('%3d-%-3d', $first, $last), $band->{q_count},
+       range_text($sizes[0][0], $sizes[1][0], !$exact),
+       range_text($sizes[0][1], $sizes[1][1], !$exact), $lp, $residual)
+    : (sprintf('%3d-%-3d', $first, $last), $type, $band->{q_count},
              $lp, range_text($sizes[0][0], $sizes[1][0], !$exact),
              range_text($sizes[0][1], $sizes[1][1], !$exact), $residual);
   if ($details) {
@@ -126,6 +182,8 @@ for my $band (@bands) {
     } ($first, $last);
     push @row, range_text(@bias), $band->{sieve_free_units},
       $band->{sieve_start_prime_floor} || '-', $band->{relation_extra};
+    push @row, map { sprintf('%.6g', policy_scale($band, $_)) }
+                   qw(fb_scale lp_scale r2_scale) if $tlp;
   }
   push @rows, \@row;
 }
@@ -139,33 +197,51 @@ for my $row (@rows) {
 my $format = join(' | ', map { "%-${_}s" } @width) . "\n";
 if ($describe) {
   say 'bits:   Bit range of the post-trial cofactor N, before multiplying by k.';
-  say 'type:   Smooth, or up to one/two large primes per raw relation (1LP/2LP).';
+  say 'type:   Smooth, or up to one/two large primes per raw relation (1LP/2LP).'
+    unless $tlp;
   say 'q:      Number of distinct factor-base primes used in polynomial A.';
-  say 'LP:     Maximum individual large prime, from K_L times the actual prime P.';
+  say $tlp
+    ? 'LP:     Maximum individual large prime, from scaled K_L times the largest FB prime P.'
+    : 'LP:     Maximum individual large prime, from K_L times the actual prime P.';
   say 'M:      Half the sieve interval; the sieve covers 2M positions.';
   say 'FB:     Number of primes used in the factor base.';
-  say 'res:    Maximum cofactor after factor-base division (a product in 2LP).';
+  say $tlp
+    ? 'R2:     Two-prime product bound; an outer scale applies after base rounding/capping.'
+    : 'res:    Maximum cofactor after factor-base division (a product in 2LP).';
   if ($details) {
     say 'bias:           Additional coarse candidate-filter headroom (sieve-byte units).';
     say 'free:           Sieve-byte rounding reserve (sieve_free_units).';
     say 'pmin:           Lower bound for the first sieved prime, not its actual value.';
     say 'rel +:          Initial relation surplus above FB + 1; readiness may stop earlier.';
+    say 'FBx/LPx/R2x:    Policy scale overrides; zero/omitted means 1. FB/LP columns include them.'
+      if $tlp;
   }
   say '';
 }
 printf $format, @headings;
 say join('-+-', map { '-' x $_ } @width);
 printf $format, @$_ for @rows;
+if ($tlp) {
+  say "\nR3 = LP*P^2; U = floor($cutoff_numerator*floor(cbrt(R3))/$cutoff_denominator).";
+}
 #say "\nM/FB: 3 significant digits; k=1000, M=1e6, G=1e9. Use --exact for integers."
 say "\nUse --exact for integers, --details for more columns, --describe for info."
   unless $exact;
 if ($details) {
   say "\nM and FB show first -> last endpoint values, not sorted extrema; sieve length is 2M.";
-  say 'P is the largest factor-base prime; smooth rows allow no primes above P.';
-  say 'LP coefficients show first -> last values of K_L; products are rounded down.';
-  say 'LP is capped at SIQS_LP_MAX before coupled R is derived: LP in 1LP, LP*P in 2LP.';
-  say 'Explicit K_R uses P in 1LP or P^2 in 2LP; R is capped at SIQS_RESIDUAL_PRODUCT_MAX.';
-  say 'Primary production bands only; low-end recovery profiles are not shown.';
+  say $tlp ? 'P is the largest factor-base prime.'
+           : 'P is the largest factor-base prime; smooth rows allow no primes above P.';
+  if ($tlp) {
+    say 'LP coefficients include LPx; fractional coefficients are preserved.';
+    say 'LP is capped at SIQS_LP_MAX; R2 uses K_R*P^2 or coupled LP*P, then R2x.';
+    say 'R2 is capped at SIQS_RESIDUAL_PRODUCT_MAX before and after its scale.';
+    say 'Only TLP bands are shown; uncovered sizes fall back to the ordinary table.';
+  } else {
+    say 'LP coefficients show first -> last values of K_L; products are rounded down.';
+    say 'LP is capped at SIQS_LP_MAX before coupled R is derived: LP in 1LP, LP*P in 2LP.';
+    say 'Explicit K_R uses P in 1LP or P^2 in 2LP; R is capped at SIQS_RESIDUAL_PRODUCT_MAX.';
+    say 'Primary production bands only; low-end recovery profiles are not shown.';
+  }
   say 'At the unused 1-bit SIQS endpoint, the FB floor is shown (pretests return first).'
   if $bands[0]{first_bits} == 1;
     say 'pmin is a floor, not the actual first sieved prime; rel + is the initial surplus.'
@@ -174,8 +250,9 @@ if ($details) {
 sub usage {
   my ($status) = @_;
   my $out = $status ? *STDERR : *STDOUT;
-  print {$out} "Usage: perl $0 [--describe] [--details] [--exact] [--header siqs.h] [siqs.c]\n",
+  print {$out} "Usage: perl $0 [--2lp|--3lp] [--describe] [--details] [--exact] [--header siqs.h] [siqs.c]\n",
     "  Default source: siqs.c in the SIQS project directory.\n",
+    "  --2lp summarizes the ordinary table (the default); --3lp summarizes the 3LP table.\n",
     "  --describe prints column descriptions above the table (aliases: --verbose, -v).\n",
     "  M/FB are compact by default (three significant digits, decimal k/M/G).\n",
     "  --exact displays M/FB as comma-separated integers instead.\n",
@@ -257,6 +334,7 @@ sub sizes_at {
   my $ln_n = $bits * numeric('M_LN2');
   my $ln_term = $ln_n >= 1 ? sqrt($ln_n * log($ln_n)) : 0;
   my $fb = exp(curve_at($band->{fb_coefficient}, $bits) * $ln_term);
+  $fb *= policy_scale($band, 'fb_scale');
   $fb = $band->{fb_floor} if $fb < $band->{fb_floor};
   my $m = $band->{fixed_half_interval};
   if (!$m) {
@@ -273,6 +351,13 @@ sub sizes_at {
     $m = int((int($interval) + $align - 1) / $align) * $align;
   }
   return [$m, int($fb)];
+}
+
+sub policy_scale {
+  my ($band, $field) = @_;
+  my $scale = $band->{$field} || 1;
+  die "invalid $field in $band->{name}\n" unless $scale > 0;
+  return $scale;
 }
 
 sub round_range_vals {
