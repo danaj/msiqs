@@ -9,3 +9,7 @@
 __pycache__/
 .DS_Store
 *.journal
+/factordb.json
+/factordb-batch-worker
+/factordb-batch-worker.exe
+/factordb-work/

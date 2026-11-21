@@ -1,0 +1,24 @@
+{
+  "_comments": {
+    "method": "Use msiqs, yafu, or mpu.  mpu is the most efficient for under 75 or so digits.",
+    "exec_mpu": "The .exe suffix is optional on Windows.",
+    "threads": "Threads per job for msiqs and YAFU.  Concurrent serial jobs for mpu.",
+    "min_digits": "Fetch exact digit sizes in ascending order through max_digits.",
+    "batch_time": "Seconds allowed for starting jobs in a batch. Zero starts jobs until the batch is complete.",
+    "short_download_delay": "Minimum seconds from an underfilled sweep to the next sweep. Factoring and submission count toward it.",
+    "sleepseconds": "Retry delay for transient RPC failures."
+  },
+  "fdb_user_token": "",
+  "method": "msiqs",
+  "exec_msiqs": "./msiqs",
+  "exec_yafu": "../yafu-new/yafu",
+  "exec_mpu": "./factordb-batch-worker",
+  "threads": 8,
+  "min_digits": 90,
+  "max_digits": 100,
+  "batch_size": 10,
+  "batch_time": 600,
+  "short_download_delay": 3,
+  "sleepseconds": 300,
+  "work_dir": "factordb-work"
+}
