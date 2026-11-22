@@ -109,16 +109,18 @@ RSA-110 in 50m 55.9s.
 
 A 2026 MacBook M5 Pro with 18 threads completed RSA-100 in 2m 16.2s.
 
-Timing results on a 48-core AMD Turin (EPYC 9B45, Zen5), 48 threads:
+November 2026 timing results:
 
-| Input    | digits | bits | time | CPU time |
+48-core AMD Turin (EPYC 9B45 4.1GHz, Zen5), 48 threads:
+
+| Input    | digits | bits | Wall time | CPU time |
 | :---:    | ---: | ---: | ---: | ---: |
-| RSA-100  | 100  | 330 |      42.7 s | |
-| RSA-110  | 110  | 364 |   7m 29s | 6 core hrs |
-| RSA-120  | 120  | 397 |  63m 22s | 51 core hrs |
-| RSA-130  | 130  | 430 | 9h 28m | 454 core hrs |
+| RSA-100  | 100  | 330 |      36.0 s | |
+| RSA-110  | 110  | 364 |   5m 35s | 4.1 core hrs |
+| RSA-120  | 120  | 397 |  35m 55s | 27.6 core hrs |
+| RSA-130  | 130  | 430 | 5h 14m   | 242 core hrs |
 
-A 96-core Xeon 8581C completed RSA-130 in 5h 44m on October 24 2026.
+With 96 threads on an Intel Xeon 8581C, RSA-100 took 31.0 s and RSA-130 took 4h 13m (379 core-hours).
 
 More comparisons can be seen in the [benchmarks document](docs/BENCHMARKS.md)
 
