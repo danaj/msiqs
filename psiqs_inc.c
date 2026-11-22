@@ -357,7 +357,7 @@ static void psiqs_merge_worker(siqs_ctx_t *master, psiqs_worker_t *worker) {
     }
   }
 #if SIQS_RESIDUAL_FIRST
-  if (master->rf != NULL) siqs_rf_maybe_submit(master);
+  if (master->rf != NULL && !master->factor_found) siqs_rf_poll(master);
 #endif
   while (ctx->raw_count != 0)
     siqs_raw_relation_free(ctx, ctx->raw[--ctx->raw_count]);

@@ -232,7 +232,7 @@ static void rf_stop_job(int factor_known) {
   packet=siqs_rf_packet_new(&master.rf->pending_arena,y,NULL,0,norm,NULL);
   siqs_rf_queue(&master,packet);
   pool->merging_worker=pool->workers;
-  siqs_rf_submit(&master,factor_known ? 0 : 1);assert(master.rf->slots[0]->running);
+  siqs_rf_submit(&master,0);assert(master.rf->slots[0]->running);
   pool->merging_worker=NULL;
   if(factor_known) {
     /* A producer packet and the LP tail should be discarded on shutdown. */
@@ -246,6 +246,7 @@ static void rf_stop_job(int factor_known) {
     assert(master.rf->jobs_done==jobs+1);
     assert(master.accepted_three_lp==0 && master.full_count==0);
   } else {
+    assert(master.rf->jobs_done==jobs+2);
     assert(master.accepted_three_lp==1 && master.full_count==1);
     siqs_verify_full_relation(&master,master.full[0]);
   }

@@ -109,8 +109,6 @@ static int siqs_is_prob_prime(const mpz_t n) {
 #endif
 #define SIQS_RF_FB_BATCH_SIZE ((SIQS_TLP_BATCH_SIZE < 16384U) ? SIQS_TLP_BATCH_SIZE : 16384U)
 #define SIQS_RF_LP_BATCH_SIZE ((SIQS_TLP_BATCH_SIZE < 16384U) ? SIQS_TLP_BATCH_SIZE : 16384U)
-#define SIQS_RF_FB_TAIL_BATCH_SIZE 32U
-#define SIQS_RF_LP_TAIL_BATCH_SIZE 4096U
 #if SIQS_TLP_BATCH_SIZE == 0 || SIQS_TLP_BATCH_SIZE > 1048576U || \
     (SIQS_TLP_BATCH_SIZE & (SIQS_TLP_BATCH_SIZE - 1U)) != 0
 # error "Invalid TLP batch capacity"
@@ -163,9 +161,8 @@ static void siqs_timing_stage(uint64_t *start, uint64_t *total) {
  X(rf_setup_us) X(rf_job_us) X(rf_job_cpu_us) X(rf_jobs) \
  X(rf_screen_us) X(rf_strip_us) X(rf_recover_us) X(rf_inputs) X(rf_accepted) \
  X(rf_screen_cpu_us) X(rf_wait_us) X(rf_worker_jobs) X(rf_coord_jobs) \
- X(rf_bulk_cpu_us) X(rf_tail_cpu_us) X(rf_forced_cpu_us) \
- X(rf_bulk_jobs) X(rf_tail_jobs) X(rf_forced_jobs) \
- X(rf_lp_bulk_cpu_us) X(rf_lp_tail_cpu_us) X(rf_lp_forced_cpu_us)
+ X(rf_bulk_cpu_us) X(rf_forced_cpu_us) X(rf_bulk_jobs) X(rf_forced_jobs) \
+ X(rf_lp_bulk_cpu_us) X(rf_lp_forced_cpu_us)
 typedef struct {
 #define SIQS_PROFILE_MEMBER(name) uint64_t name;
   SIQS_PROFILE_FIELDS(SIQS_PROFILE_MEMBER)
@@ -1370,7 +1367,6 @@ static void siqs_rf_capture(siqs_ctx_t *, const siqs_poly_t *, int32_t,
 static void siqs_rf_queue(siqs_ctx_t *, siqs_raw_relation_t *);
 static void siqs_rf_poll(siqs_ctx_t *);
 static void siqs_rf_flush(siqs_ctx_t *);
-static void siqs_rf_maybe_submit(siqs_ctx_t *);
 static size_t siqs_rf_pending(const siqs_ctx_t *);
 static void siqs_ctx_clear(siqs_ctx_t *);
 #endif
@@ -2543,8 +2539,9 @@ static siqs_raw_relation_t *siqs_raw_relation_new(siqs_ctx_t *ctx,
   } else {
     r->factors.wide = (siqs_factor_t *)siqs_malloc(
         siqs_array_size(nfactors, sizeof(*r->factors.wide)));
-    memcpy(r->factors.wide, factors,
-           (size_t)nfactors * sizeof(*r->factors.wide));
+    if (nfactors != 0)
+      memcpy(r->factors.wide, factors,
+             (size_t)nfactors * sizeof(*r->factors.wide));
   }
   return r;
 }
@@ -6725,13 +6722,12 @@ static int siqs_run(siqs_ctx_t *ctx) {
           ctx->tlp_upper, ctx->params.tlp_cutoff, batch_capacity);
     }
 #if SIQS_RESIDUAL_FIRST
-    if (ctx->rf != NULL)
-      printf("# siqs residual-first: exact FB screening, recover accepted rows; batch %u, tail %u, jobs %u (initial %u)\n",
-          (unsigned)ctx->rf->fb_capacity, (unsigned)ctx->rf->tail_norm_target, ctx->rf->job_limit, ctx->rf->job_count);
-    if (ctx->rf != NULL)
-      printf("# siqs residual batches FB %zu, LP %zu, tail FB %zu / LP %zu\n",
-          ctx->rf->fb_capacity, ctx->rf->lp_capacity,
-          ctx->rf->tail_norm_target, ctx->rf->tail_lp_target);
+    if (ctx->rf != NULL) {
+      printf("# siqs residual-first: exact FB screening, recover accepted rows; jobs %u (initial %u)\n",
+          ctx->rf->job_limit, ctx->rf->job_count);
+      printf("# siqs residual batches FB %zu, LP %zu\n",
+          ctx->rf->fb_capacity, ctx->rf->lp_capacity);
+    }
 #endif
     if (ctx->tlp_policy != NULL)
       printf("# siqs 3LP policy: guarded 2LP on, exact gap on, early admission off\n");

@@ -137,12 +137,14 @@ Residual-first processing strips the FB part in batches,
 tests the remaining cofactor, and recovers exact FB exponents only for
 accepted records. An available sieve worker runs a batch job, with the
 coordinator as fallback. The residual pool starts with one private context
-and grows for full producer batches up to the worker count. Small tail
-batches reuse existing contexts. Immutable prime products are shared across
-contexts. Equal FB/LP batch capacities also share one mutable product-tree
-workspace within each context. Result descriptors grow with accepted output.
+and grows for full producer batches up to the worker count. Short batches
+in the final drain reuse existing contexts. Immutable prime products are
+shared across contexts. Equal FB/LP batch capacities share one mutable
+product-tree workspace within each context. Result descriptors grow with
+accepted output.
 Sieve workers publish bounded chunks throughout collection and can resume
-the same polynomial family. Residual batches shrink near the collection target.
+the same polynomial family. FB and LP screening keep their full batch sizes
+throughout collection so workers can stay busy near the target.
 
 Periodic journal checkpoints save the coordinator's accepted state while
 residual jobs continue. On restart, pending sieve and residual work is

@@ -876,7 +876,7 @@ struct siqs_rf_state {
 
 struct siqs_rf_pool {
   siqs_raw_relation_t **pending;
-  size_t count, fb_capacity, lp_capacity, tail_norm_target, tail_lp_target;
+  size_t count, fb_capacity, lp_capacity;
   siqs_raw_arena_t pending_arena;
   siqs_tlp_prime_store *fb_store, *lp_store;
   mpz_t *tree;
@@ -888,7 +888,6 @@ struct siqs_rf_pool {
 #endif
   uint64_t next_ticket;
   uint64_t inputs_done, jobs_done, recovered, short_jobs;
-  int tail;
 #ifdef SIQS_RF_TEST_HOOKS
   void (*started)(void *);
   void *started_data;
@@ -1221,9 +1220,8 @@ static void siqs_rf_lp_flush(struct siqs_rf_state *s) {
   ctx->result->profile.tlp_gcd_us += siqs_timing_elapsed(start);
   cpu = siqs_timing_cpu_now()-cpu;
   ctx->result->profile.tlp_gcd_cpu_us += cpu;
-  if (s->drain_lp == 0) ctx->result->profile.rf_lp_bulk_cpu_us += cpu;
-  else if (s->drain_lp == 1) ctx->result->profile.rf_lp_tail_cpu_us += cpu;
-  else ctx->result->profile.rf_lp_forced_cpu_us += cpu;
+  if (s->drain_lp) ctx->result->profile.rf_lp_forced_cpu_us += cpu;
+  else ctx->result->profile.rf_lp_bulk_cpu_us += cpu;
 #endif
   ++ctx->tlp_batches;
   for (i = 0; i < s->lp_count; ++i) {
@@ -1306,8 +1304,7 @@ static int siqs_rf_run_body(void *data) {
     }
   }
   siqs_rf_recover(s, s->direct, direct);
-  if (s->drain_lp == 2 || (s->drain_lp && s->lp_count >= s->pool->tail_lp_target))
-    siqs_rf_lp_flush(s);
+  if (s->drain_lp) siqs_rf_lp_flush(s);
   return SIQS_TLP_OK;
 }
 
@@ -1406,9 +1403,8 @@ static void siqs_rf_finish_slot(siqs_ctx_t *ctx, struct siqs_rf_state *s,
   ++ctx->result->profile.rf_jobs;
   if (s->on_worker) ++ctx->result->profile.rf_worker_jobs;
   else ++ctx->result->profile.rf_coord_jobs;
-  if (s->drain_lp == 0) { ++ctx->result->profile.rf_bulk_jobs; ctx->result->profile.rf_bulk_cpu_us += result.cpu_us; }
-  else if (s->drain_lp == 1) { ++ctx->result->profile.rf_tail_jobs; ctx->result->profile.rf_tail_cpu_us += result.cpu_us; }
-  else { ++ctx->result->profile.rf_forced_jobs; ctx->result->profile.rf_forced_cpu_us += result.cpu_us; }
+  if (s->drain_lp) { ++ctx->result->profile.rf_forced_jobs; ctx->result->profile.rf_forced_cpu_us += result.cpu_us; }
+  else { ++ctx->result->profile.rf_bulk_jobs; ctx->result->profile.rf_bulk_cpu_us += result.cpu_us; }
 #endif
   for (i = 0; i < s->resolver.raw_count; ++i) {
     siqs_raw_relation_t *r = s->resolver.raw[i];
@@ -1482,7 +1478,7 @@ static void siqs_rf_submit(siqs_ctx_t *ctx, int drain) {
     uint64_t start = siqs_timing_now();
 #endif
     /* Grow only for a full producer batch while every current slot is busy.
-     * Tail and checkpoint drains reuse existing scratch. Each context keeps a
+     * Drains reuse existing scratch. Each context keeps a
      * stable address while workers hold callbacks into it. */
     index = p->job_count;
     siqs_rf_slot_init(ctx, p, index);
@@ -1509,30 +1505,10 @@ static void siqs_rf_queue(siqs_ctx_t *ctx, siqs_raw_relation_t *packet) {
   if (p == NULL || packet->rf_norm == NULL || p->count >= p->fb_capacity)
     croak("SIQS residual-first: invalid norm queue");
   p->pending[p->count++] = packet;
-  if (p->count == p->fb_capacity) siqs_rf_submit(ctx, p->tail);
+  if (p->count == p->fb_capacity) siqs_rf_submit(ctx, 0);
 }
 
 static void siqs_rf_poll(siqs_ctx_t *ctx) { siqs_rf_finish(ctx, 0); }
-
-static void siqs_rf_maybe_submit(siqs_ctx_t *ctx) {
-  struct siqs_rf_pool *p = ctx->rf;
-  uint32_t target = ctx->matrix_next_target;
-  uint32_t margin = ctx->params.fb_size / 32U;
-  if (ctx->tlp->flushing || ctx->factor_found) return;
-  if (margin < 1024U) margin = 1024U;
-  siqs_rf_finish(ctx, 0);
-  if (ctx->factor_found) return;
-  if (target != 0 && (uint64_t)siqs_relation_count(ctx)+margin >= target) p->tail = 1;
-  if (p->tail && p->count >= p->tail_norm_target) siqs_rf_submit(ctx, 1);
-  /* An idle slot can retain an old LP tail even after the producer empties.
-   * Drain it now rather than waiting for another full norm batch. */
-  if (p->tail && p->count == 0) {
-    unsigned i;
-    for (i = 0; i < p->job_count && !ctx->factor_found; ++i)
-      if (!p->slots[i]->running && p->slots[i]->published_lp_count >= p->tail_lp_target)
-        siqs_rf_launch(ctx, p->slots[i], 1);
-  }
-}
 
 static size_t siqs_rf_pending(const siqs_ctx_t *ctx) {
   const struct siqs_rf_pool *p = ctx->rf;
@@ -1562,13 +1538,13 @@ static void siqs_rf_flush(siqs_ctx_t *ctx) {
   if (ctx->tlp->flushing) return;
   siqs_rf_finish(ctx, 1);
   if (!ctx->factor_found && p->count != 0) {
-    siqs_rf_submit(ctx, 2);
+    siqs_rf_submit(ctx, 1);
     siqs_rf_finish(ctx, 1);
   }
   /* A zero-norm job drains each slot's independent LP queue. */
   for (i = 0; i < p->job_count && !ctx->factor_found; ++i)
     if (p->slots[i]->published_lp_count != 0)
-      siqs_rf_launch(ctx, p->slots[i], 2);
+      siqs_rf_launch(ctx, p->slots[i], 1);
   siqs_rf_finish(ctx, 1);
   /* Once a factor is found, wait for assigned jobs and release the queues. */
   if (ctx->factor_found) siqs_rf_discard_pending(p);
@@ -1599,7 +1575,10 @@ static void siqs_rf_capture(siqs_ctx_t *ctx, const siqs_poly_t *poly,
   packet = siqs_rf_packet_new(ctx->buffer_relations ? &ctx->raw_arena : &ctx->rf->pending_arena,
                               y, f, used, norm, NULL);
   if (ctx->buffer_relations) siqs_store_raw(ctx, packet);
-  else { siqs_rf_queue(ctx, packet); siqs_rf_maybe_submit(ctx); }
+  else {
+    siqs_rf_queue(ctx, packet);
+    if (!ctx->factor_found) siqs_rf_poll(ctx);
+  }
 }
 
 static void siqs_rf_slot_init(siqs_ctx_t *ctx, struct siqs_rf_pool *p,
@@ -1645,9 +1624,9 @@ static void siqs_rf_slot_init(siqs_ctx_t *ctx, struct siqs_rf_pool *p,
       )) croak("SIQS residual-first: job synchronization allocation");
 }
 
-static size_t siqs_rf_capacity(size_t capacity, int power_of_two) {
+static size_t siqs_rf_capacity(size_t capacity) {
   if (capacity == 0 || capacity > 1048576U ||
-      (power_of_two && (capacity & (capacity-1U)) != 0))
+      (capacity & (capacity-1U)) != 0)
     croak("SIQS: unsupported residual batch capacity");
   return capacity;
 }
@@ -1673,14 +1652,8 @@ static void siqs_rf_init(siqs_ctx_t *ctx) {
   p->job_limit = ctx->nthreads > 1 ? ctx->nthreads : 1U;
   p->slots = siqs_calloc(p->job_limit, sizeof(*p->slots));
   p->job_count = 1U;
-  p->fb_capacity = siqs_rf_capacity(SIQS_RF_FB_BATCH_SIZE, 1);
-  p->lp_capacity = siqs_rf_capacity(SIQS_RF_LP_BATCH_SIZE, 1);
-  p->tail_norm_target = siqs_rf_capacity(SIQS_RF_FB_TAIL_BATCH_SIZE < p->fb_capacity
-        ? SIQS_RF_FB_TAIL_BATCH_SIZE : p->fb_capacity, 0);
-  p->tail_lp_target = siqs_rf_capacity(SIQS_RF_LP_TAIL_BATCH_SIZE < p->lp_capacity
-        ? SIQS_RF_LP_TAIL_BATCH_SIZE : p->lp_capacity, 0);
-  if (p->tail_norm_target > p->fb_capacity || p->tail_lp_target > p->lp_capacity)
-    croak("SIQS: tail target exceeds full capacity");
+  p->fb_capacity = siqs_rf_capacity(SIQS_RF_FB_BATCH_SIZE);
+  p->lp_capacity = siqs_rf_capacity(SIQS_RF_LP_BATCH_SIZE);
   p->pending = siqs_calloc(p->fb_capacity, sizeof(*p->pending));
   p->leaves = 1; while (p->leaves < ((size_t)end-begin+31U)/32U) p->leaves *= 2U;
   p->tree = siqs_malloc(siqs_array_size(2U*p->leaves, sizeof(*p->tree)));
