@@ -12,8 +12,8 @@ def check(name):
  global passed
  passed+=1;print('PASS '+name,flush=True)
 
-def inspect(path,verify=False):
- reader=info.Journal(path,verify)
+def inspect(path,verify=False,eta_only=False):
+ reader=info.Journal(path,verify,eta_only=eta_only)
  try:reader.scan();return reader.summary(300)
  finally:reader.close()
 
@@ -55,6 +55,17 @@ with tempfile.TemporaryDirectory(prefix='journal-info-',dir=RESULTS) as director
  assert 'ETA:' not in text and text.rstrip().endswith('Collection completed.')
  assert result['job_end']['complete'] and result['job_end']['partition']['n']==str(ONE)
  check('JSON/text parameters, compact final counters and completion')
+ assert f"Stored raw relations: {result['relation_count']:,}; frame checksums and progress OK" in text
+ event_frame=next(frame for frame in batches if frame[2][4])
+ start,end,_=event_frame;event_offset=info.FRAME.size+8*len(info.PROGRESS)
+ altered=bytearray(data);altered[start+event_offset]=255
+ bad=tmp/'bad-event.journal';bad.write_bytes(altered)
+ assert 'frame checksum mismatch' in cli(bad,'--eta',ok=False).stderr
+ bad.write_bytes(rewrite(data,event_frame,payload=altered[start+info.FRAME.size:end]))
+ assert 'Collection completed.' in cli(bad,'--eta').stdout
+ for flag in ('--json','--strict','--verify-relations'):
+  assert 'unknown batch event' in cli(bad,'--eta',flag,ok=False).stderr
+ check('compact ETA skips event decoding while retaining frame checksums')
  assert cli(path,'--follow','--eta','--interval','.01').stdout.rstrip().endswith('Collection completed.')
  assert json.loads(cli(path,'--follow','--json','--interval','.01').stdout)['job_end']['complete']
  check('text and JSON followers exit on the final job record')
@@ -167,6 +178,9 @@ with tempfile.TemporaryDirectory(prefix='journal-info-',dir=RESULTS) as director
  assert rate and rate['run']==0 and rate['full_per_second']>0
  remaining=max(0,ctx['snapshot']['collection_target']-ctx['snapshot']['full_relations'])
  assert abs(rate['collection_eta_seconds']-remaining/rate['full_per_second'])<1e-9
+ fast=inspect(eta,eta_only=True)
+ assert fast['relation_count']==inspect(eta)['relation_count']
+ assert fast['contexts'][0]['rate']==rate and fast['contexts'][0]['snapshot']==ctx['snapshot']
  check('ETA uses same-run/context monotonic progress')
  live=tmp/'live.journal'
  with (tmp/'collector.log').open('w') as collector_log,(tmp/'follow.log').open('w') as follow_log:

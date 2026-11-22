@@ -470,6 +470,12 @@ factor vectors directly.  Graph snapshots are checked for structural consistency
 but the Python tool does not reconstruct the graph. Measured raw/full rates
 use monotonic progress within one context/run; UTC anomalies only warn.
 
+Plain `--eta`, including with `--follow`, checks frame checksums and reads
+batch progress snapshots without decoding individual family and relation
+records. Raw relation counts come from the batch event counts and the
+change in the family count. Add `--json`, `--verify-relations` or
+`--strict` to use the full decoder.
+
 Collection ETA uses a local quadratic fit to completed full relations over
 the recent window (five minutes by default), anchored to the actual current
 count.  The fit uses equal-duration bins to limit the influence of bursts of

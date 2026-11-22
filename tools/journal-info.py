@@ -161,10 +161,11 @@ def utc_text(value):
 
 
 class Journal:
-    def __init__(self, path, verify=False):
+    def __init__(self, path, verify=False, eta_only=False):
         self.path=Path(path)
         self.file=self.path.open('rb')
         self.verify=verify
+        self.eta_only=eta_only
         self.sequence=0
         self.contexts=[]
         self.active=None
@@ -244,21 +245,13 @@ class Journal:
         self.primes=primes
         self.active=dict(id=len(self.contexts)+1,n=str(n),bits=n.bit_length(),
                          multiplier=multiplier,policy=name,parameters=params,
-                         pmax=primes[-1],initial_rng=initial_rng,relations=Counter(),families=0,
+                         pmax=primes[-1],initial_rng=initial_rng,relations=Counter(),families=0,raw_count=0,
                          snapshot=None,ended=False,samples=deque(maxlen=5000),sample_run=None)
         self.contexts.append(self.active)
 
-    def batch(self, r, count, run, elapsed, bad_clock):
-        ctx=self.active
-        require(ctx is not None and not ctx['ended'],'batch outside an active context')
-        snapshot={name:r.u64() for name in PROGRESS}
-        require(all(snapshot[name] for name in ('la_rng','cofactor_rng','poly_rng')),
-                'invalid zero RNG state')
-        require(count<=(len(r.data)-r.at)//2,'invalid batch event count')
-        self.bytes['batch_snapshots']+=8*len(PROGRESS)
+    def batch_events(self, r, count, ctx):
         params=ctx['parameters'];width=max(1,(params['large_prime_bound'].bit_length()+7)//8)
         n=int(ctx['n']);magnitude_limit=(n.bit_length()+7)//8
-        before=sum(ctx['relations'].values())
         for _ in range(count):
             kind,info=r.u8(),r.u8()
             if kind==2:
@@ -302,12 +295,34 @@ class Journal:
             kind=RELATION_NAMES[labels]
             ctx['relations'][kind]+=1;self.records[kind]+=1
         r.done()
+
+    def batch(self, r, count, run, elapsed, bad_clock):
+        ctx=self.active
+        require(ctx is not None and not ctx['ended'],'batch outside an active context')
+        snapshot={name:r.u64() for name in PROGRESS}
+        require(all(snapshot[name] for name in ('la_rng','cofactor_rng','poly_rng')),
+                'invalid zero RNG state')
+        require(count<=(len(r.data)-r.at)//2,'invalid batch event count')
+        self.bytes['batch_snapshots']+=8*len(PROGRESS)
+        before=ctx['raw_count']
+        if self.eta_only:
+            # Version 2 batches contain only family and relation events. The
+            # frame count and the snapshot's family delta give the raw count.
+            new_families=snapshot['families']-ctx['families']
+            require(0<=new_families<=count,'invalid batch family delta')
+            ctx['families']=snapshot['families']
+            raw=before+count-new_families
+            self.bytes['undecoded_batch_events']+=len(r.data)-r.at
+        else:
+            self.batch_events(r,count,ctx)
+            raw=sum(ctx['relations'].values())
+        ctx['raw_count']=raw
         require(snapshot['families']==ctx['families'],'family progress differs from events')
         full=snapshot['full_relations'];hist=[snapshot[key] for key in PROGRESS[-8:]]
         require(sum(hist)==full,'cycle histogram does not sum to completed relations')
-        require(full<=snapshot['stored_relations']<=sum(ctx['relations'].values()),
+        require(full<=snapshot['stored_relations']<=raw,
                 'invalid stored/useful relation counts')
-        require(snapshot['retained_partials']<=sum(ctx['relations'].values()),'invalid retained-partial count')
+        require(snapshot['retained_partials']<=raw,'invalid retained-partial count')
         require(snapshot['collection_target']<=0xffffffff,'collection target out of range')
         old=ctx['snapshot']
         if old:
@@ -324,8 +339,8 @@ class Journal:
         elif bad_clock:
             ctx['samples'].clear()
         if not bad_clock:
-            ctx['samples'].append((elapsed,sum(ctx['relations'].values()),full))
-        self.runs[-1]['relations']+=sum(ctx['relations'].values())-before
+            ctx['samples'].append((elapsed,raw,full))
+        self.runs[-1]['relations']+=raw-before
 
     def partition(self, r):
         n=r.magnitude()
@@ -418,7 +433,7 @@ class Journal:
     def summary(self, window, eta_model='quadratic', eta_horizon=None):
         contexts=[]
         for ctx in self.contexts:
-            item={key:value for key,value in ctx.items() if key not in ('samples','sample_run')}
+            item={key:value for key,value in ctx.items() if key not in ('samples','sample_run','raw_count')}
             item['relations']=dict(ctx['relations'])
             rate=None
             samples=recent_samples(ctx['samples'],window)
@@ -436,7 +451,7 @@ class Journal:
             item['rate']=rate
             contexts.append(item)
         runs=[dict(v,first_utc=utc_text(v['first_utc_us']),last_utc=utc_text(v['last_utc_us'])) for v in self.runs]
-        size=os.fstat(self.file.fileno()).st_size;total=sum(self.records.values())
+        size=os.fstat(self.file.fileno()).st_size;total=sum(ctx['raw_count'] for ctx in self.contexts)
         require(sum(self.bytes.values())==self.committed,'internal byte accounting mismatch')
         return dict(path=str(self.path),n=str(self.n),bits=self.n.bit_length(),file_bytes=size,
                     validated_bytes=self.committed,frames=self.sequence,tail=self.tail,
@@ -504,7 +519,7 @@ def display(info, eta, window=300):
     for warning in info['warnings']:print('Warning: '+warning)
 
 
-def display_eta(info, previous, window=300):
+def display_eta(info, previous, window=300, eta_only=False):
     ctx=info['contexts'][-1] if info['contexts'] else None
     snapshot=ctx['snapshot'] if ctx else None
     target=(snapshot['collection_target'] if snapshot else ctx['parameters']['target_relations']) if ctx else None
@@ -513,7 +528,8 @@ def display_eta(info, previous, window=300):
         print('Journal: '+info['path'])
         print('N: '+info['n'])
         print(f"{info['bits']} bits; {info['frames']:,} valid frames; {info['validated_bytes']:,}/{info['file_bytes']:,} validated bytes; writing runs: {len(info['runs'])}")
-        print(f"Stored raw relations: {info['relation_count']:,}; checksums and structure OK")
+        checked='frame checksums and progress OK' if eta_only else 'checksums and structure OK'
+        print(f"Stored raw relations: {info['relation_count']:,}; {checked}")
     if ctx and (previous is None or previous['context']!=context):
         p=ctx['parameters']
         print(f"Context {context}: {ctx['policy']}, k={ctx['multiplier']}, FB={p['fb_size']:,}, M={p['half_interval']:,}, q={p['q_count']}, d={p['poly_d']}")
@@ -556,9 +572,10 @@ def main():
         ap.error('window and interval must be positive finite values')
     if args.eta_horizon is not None and (not math.isfinite(args.eta_horizon) or args.eta_horizon<=0):
         ap.error('ETA horizon must be a positive finite value')
+    eta_only=args.eta and not (args.json or args.verify_relations or args.strict)
     journal=None;retry=None;first=True;previous=None
     try:
-        journal=Journal(args.journal,args.verify_relations)
+        journal=Journal(args.journal,args.verify_relations,eta_only=eta_only)
         while True:
             try:
                 added=journal.scan();retry=None
@@ -570,7 +587,7 @@ def main():
                 info=journal.summary(args.window,args.eta_model,args.eta_horizon)
                 if args.json:print(json.dumps(info,sort_keys=True),flush=True)
                 else:
-                    if args.eta:previous=display_eta(info,previous,args.window)
+                    if args.eta:previous=display_eta(info,previous,args.window,eta_only=eta_only)
                     else:display(info,False,args.window)
                     if info['job_end'] is not None:
                         print('Collection completed.' if info['job_end']['complete'] else 'Job ended without a complete factorization.')
