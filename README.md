@@ -15,8 +15,8 @@ hand-written assembly or explicit SIMD intrinsics.
 ## Installation and use
 
 Building requires a C compiler and GMP (6.2 or newer recommended).
-You do *not* need Perl to build
-the standalone tool, which can be compiled with a single CC line.
+The Makefile uses Perl.  The direct compiler command requires only
+a C compiler and GMP.
 
 ### Standalone program
 
@@ -27,7 +27,7 @@ make
 ./msiqs 22095311209999409685885162322219
 ```
 
-To request eight workers and periodic progress reports:
+With a pthread build, request eight workers and periodic progress reports:
 
 ```sh
 ./msiqs -t 8 -vv 22095311209999409685885162322219
@@ -44,7 +44,8 @@ See [build and API notes](docs/IMPLEMENTATION.md#build-and-api-notes) for
 compiler options and serial-only builds.
 
 Three-large-prime collection is selected automatically for post-trial
-cofactors of 361 bits and larger. Smaller cofactors use the ordinary policies.
+cofactors of 361 bits and larger.  Smaller cofactors use the ordinary policies.
+
 The command-line options override that selection:
 
 ```sh
@@ -53,17 +54,18 @@ The command-line options override that selection:
 ```
 
 `--2lp` forces the ordinary policies. `--3lp` selects the separate `3lp_...`
-policy table for post-trial cofactors of 270 through 512 bits. Uncovered
-sizes use the ordinary policies. Recovery policies and internal
+policy table for post-trial cofactors of 270 through 512 bits.  Uncovered
+sizes use the ordinary policies.  Recovery policies and internal
 cofactor-splitter calls retain their existing selection.
 
+For large inputs, `--2lp` can reduce peak memory.  Factoring may take longer.
+
 3LP uses batch GCDs and shared large-prime combination before constructing
-the factor-base matrix. Pthread builds enable residual-first screening by
+the factor-base matrix.  Pthread builds enable residual-first screening by
 default and recover exact factor vectors only for accepted records.
 The batch cutoff trades some relation yield for memory.
-3LP can use more memory and take longer than ordinary 2LP collection.
 `make check-3lp` runs the component checks. `make check-3lp-integration` also
-factors a 270-bit semiprime with pthreads, interrupts and resumes a journal,
+factors a 270-bit semiprime, interrupts and resumes a journal,
 and verifies every saved relation and completed replay.
 
 To save relation collection and resume it later, use an optional journal:
@@ -117,8 +119,8 @@ November 2026 timing results:
 | :---:    | ---: | ---: | ---: | ---: |
 | RSA-100  | 100  | 330 |      36.0 s | |
 | RSA-110  | 110  | 364 |   5m 35s | 4.1 core hrs |
-| RSA-120  | 120  | 397 |  35m 55s | 27.6 core hrs |
-| RSA-130  | 130  | 430 | 5h 14m   | 242 core hrs |
+| RSA-120  | 120  | 397 |  34m 56s | 27.0 core hrs |
+| RSA-130  | 130  | 430 | 5h 3m   | 241 core hrs |
 
 With 96 threads on an Intel Xeon 8581C, RSA-100 took 31.0 s and RSA-130 took 4h 13m (379 core-hours).
 

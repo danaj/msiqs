@@ -814,7 +814,7 @@ static const siqs_policy_band_t siqs_policy_bands[] = {
     SIQS_POLICY_LINEAR(0.31466, 0.00020, 331),               /* FB      */
     SIQS_POLICY_RAMP(0.44, 0.5071, 331, 360),                /* M       */
     SIQS_POLICY_RATIO(0.15231778066, 19, -1, 50),            /* M ratio */
-    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0, 0, 0 }, /* sieve-e */
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0,0,0},   /* sieve-e */
   /* Shorter M screened at 380/400 bits. */
   { "two_lp_high_q12_interval_finish", 361, 400,
     2, 12, 12, 0, 0,
@@ -824,7 +824,7 @@ static const siqs_policy_band_t siqs_policy_bands[] = {
     SIQS_POLICY_LINEAR(0.31322, 0.000202, 331),              /* FB      */
     SIQS_POLICY_RAMP(0.5046, 0.4063, 361, 400),              /* M       */
     SIQS_POLICY_RATIO(0.15231778066, -11, -1, 50),           /* M ratio */
-    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0, 0, 0 }, /* sieve-e */
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0,0,0},   /* sieve-e */
   /* Slower FB growth, M from 400/410/420/430 screening. */
   { "two_lp_q12_high_level", 401, 430,
     2, 12, 12, 0, 0,
@@ -834,17 +834,17 @@ static const siqs_policy_band_t siqs_policy_bands[] = {
     SIQS_POLICY_LINEAR(0.32670, -0.000248, 401),             /* FB */
     SIQS_POLICY_RAMP(0.4038, 0.3040, 401, 430),              /* M */
     SIQS_POLICY_RATIO(0.15231778066, -51, -1, 50),           /* M ratio */
-    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0, 0, 0 }, /* sieve-e */
-  /* Untuned q13 continuation: retain 40% of the previous M curve. */
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0,0,0},   /* sieve-e */
+  /* Shorter M screened in 2LP at 431, 460, and 500 bits. */
   { "two_lp_q13_vhigh", 431, 512,
     2, 13, 12, 0, 0,
     SIQS_POLICY_RAMP(416.0, 512.0, 431, 512),                /* K_L     */
     SIQS_POLICY_RAMP(1024.0, 1536.0, 431, 512),              /* K_R     */
     16, 384, 160, 96, 0, 0,
     SIQS_POLICY_LINEAR(0.31926, -0.000248, 431),             /* FB */
-    SIQS_POLICY_RAMP(0.3032, 0.2384, 431, 512),              /* M */
+    SIQS_POLICY_RAMP(0.2274, 0.1788, 431, 512),              /* M */
     SIQS_POLICY_RATIO(0.15231778066, -81, -1, 50),           /* M ratio */
-    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0, 0, 0 }          /* sieve-e */
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0,0,0 }   /* sieve-e */
 };
 
 
@@ -861,27 +861,24 @@ static const siqs_policy_band_t siqs_tlp_policy_bands[] = {
     SIQS_POLICY_LINEAR(0.30563, 0.000087, 270),
     SIQS_POLICY_LINEAR(0.45, -0.0064759, 270),
     SIQS_POLICY_RATIO(0.15231778066, 0, 1, 30),
-    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0, 0, 0 },
-  /* Start q=12 early for safety: difficult 300/310-bit cases consumed less
-   * of the polynomial budget than with q=11. */
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0,0,0},
   { "3lp_q12_safety_bridge", 300, 310, 3, 12, 12, 0, 0,
     SIQS_POLICY_RAMP(208.0, 248.0, 300, 310), SIQS_R_DERIVED_FROM_LP,
     16, 384, 160, 96, 0, 0,
     SIQS_POLICY_LINEAR(0.30947805274395174, 0.00017299534431592934, 300),
     SIQS_POLICY_LINEAR(0.25, 0.0, 305),
     SIQS_POLICY_RATIO(0.15231778066, 50, -1, 50),
-    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0, 0, 0 },
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0,0,0},
   { "3lp_high_q12_interval_rise", 311, 330, 3, 12, 12, 0, 0,
     SIQS_POLICY_RAMP(248.0, 280.0, 311, 330), SIQS_R_DERIVED_FROM_LP,
     16, 384, 160, 96, 0, 0,
-    /* Geometry meets the next band's 331-bit setup. */
     SIQS_POLICY_RAMP(0.31138, 0.31466, 311, 331),
     SIQS_POLICY_RAMP(0.25, 0.44, 311, 331),
     SIQS_POLICY_RATIO(0.15231778066, 39, -1, 50),
     SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0,
-    .fb_scale = 0.85,
-    .lp_scale = 0.75,
-    .r2_scale = 4.0 },
+    .fb_scale = 0.85, .lp_scale = 0.75, .r2_scale = 4.0 },
+  /* 3LP starts being faster around 330-350 bits, but we hold off the
+   * default until 361 bits, as 3LP is higher memory. */
   { "3lp_high_q12_interval_bridge", 331, 360,
     3, 12, 12, 0, 0,
     SIQS_POLICY_RAMP(280.0, 384.0, 331, 400),                /* K_L     */
@@ -892,10 +889,7 @@ static const siqs_policy_band_t siqs_tlp_policy_bands[] = {
     SIQS_POLICY_RATIO(0.15231778066, 19, -1, 50),            /* M ratio */
     SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0,           /* sieve-e */
     /* Measured on two 350-bit full factorizations. */
-    .fb_scale = 0.85,
-    .lp_scale = 0.75,
-    .r2_scale = 4.0 },
-  /* Shorter M screened at 380/400 bits. */
+    .fb_scale = 0.85, .lp_scale = 0.75, .r2_scale = 4.0 },
   { "3lp_high_q12_interval_finish", 361, 400,
     3, 12, 12, 0, 0,
     SIQS_POLICY_RAMP(280.0, 384.0, 331, 400),                /* K_L     */
@@ -904,8 +898,8 @@ static const siqs_policy_band_t siqs_tlp_policy_bands[] = {
     SIQS_POLICY_LINEAR(0.31322, 0.000202, 331),              /* FB      */
     SIQS_POLICY_RAMP(0.5046, 0.4063, 361, 400),              /* M       */
     SIQS_POLICY_RATIO(0.15231778066, -11, -1, 50),           /* M ratio */
-    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0, 0, 0 }, /* sieve-e */
-  /* Slower FB growth, M from 400/410/420/430 screening. */
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0,           /* sieve-e */
+    .fb_scale = 0.90, .lp_scale = 1.10, .r2_scale = 4.0 },
   { "3lp_q12_high_level", 401, 430,
     3, 12, 12, 0, 0,
     SIQS_POLICY_RAMP(384.0, 416.0, 401, 430),                /* K_L     */
@@ -914,17 +908,19 @@ static const siqs_policy_band_t siqs_tlp_policy_bands[] = {
     SIQS_POLICY_LINEAR(0.32670, -0.000248, 401),             /* FB */
     SIQS_POLICY_RAMP(0.4038, 0.3040, 401, 430),              /* M */
     SIQS_POLICY_RATIO(0.15231778066, -51, -1, 50),           /* M ratio */
-    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0, 0, 0 }, /* sieve-e */
-  /* Untuned q13 continuation: retain 40% of the previous M curve. */
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0,           /* sieve-e */
+    .fb_scale = 0.90, .lp_scale = 1.10, .r2_scale = 4.0 },
   { "3lp_q13_vhigh", 431, 512,
     3, 13, 12, 0, 0,
     SIQS_POLICY_RAMP(416.0, 512.0, 431, 512),                /* K_L     */
     SIQS_POLICY_RAMP(1024.0, 1536.0, 431, 512),              /* K_R     */
     16, 384, 160, 96, 0, 0,
     SIQS_POLICY_LINEAR(0.31926, -0.000248, 431),             /* FB */
-    SIQS_POLICY_RAMP(0.3032, 0.2384, 431, 512),              /* M */
+    SIQS_POLICY_RAMP(0.256204, 0.11410887, 431, 512),        /* M */
     SIQS_POLICY_RATIO(0.15231778066, -81, -1, 50),           /* M ratio */
-    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0, 0, 0, 0 }          /* sieve-e */
+    SIQS_POLICY_LINEAR(0.18, 0.0003, 150), 0.0, 0,           /* sieve-e */
+    /* In 2LP, factor base was low to save memory.  Allow more in 3LP. */
+    .fb_scale = 1.10, .lp_scale = 1.10, .r2_scale = 4.0 }
 };
 
 /* Retry low q=1/q=2 failures with q=1 at 8K and 16K.
