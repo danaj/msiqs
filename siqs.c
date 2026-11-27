@@ -225,20 +225,23 @@ typedef struct {
 #define SIQS_SIEVE_ALIGN          256U
 #define SIQS_HALF_INTERVAL_MAX   (UINT32_C(1) << 30)
 
-/* Architecture-based defaults for L1-sized sieve blocks; autotuning can
- * override this size without changing the collection policy. */
+/* Choose a sieve block maximum for the target architecture. Autotuning
+ * can override this size without changing the collection policy. */
 #ifndef SIQS_SIEVE_BLOCK_SIZE
-#  if !defined(_M_ARM64EC) && (defined(__i386__) || defined(__x86_64__) || \
-                               defined(_M_IX86) || defined(_M_X64))
+#  if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64) || \
+      defined(_M_ARM64EC)
+#    define SIQS_SIEVE_BLOCK_SIZE   (80U * 1024U)
+#  elif defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || \
+        defined(_M_X64)
 #    define SIQS_SIEVE_BLOCK_SIZE   (32U * 1024U)
 #  else
 #    define SIQS_SIEVE_BLOCK_SIZE   (64U * 1024U)
 #  endif
 #endif
 
-/* At 64 KiB, M1 Pro measurements favored activation near 160 KiB (2.5x).
- * Scale that starting point with block size; other sizes/machines may need
- * a different threshold.  A zero block size disables blocking. */
+/* M1 Pro measurements with 64 KiB blocks favored activation near 160 KiB.
+ * Use the same 2.5x ratio for other block sizes. A zero maximum disables
+ * blocking. */
 #ifndef SIQS_SIEVE_BLOCK_MIN_LENGTH
 # define SIQS_SIEVE_BLOCK_MIN_LENGTH (5U * SIQS_SIEVE_BLOCK_SIZE / 2U)
 #endif

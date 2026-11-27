@@ -121,6 +121,12 @@ static INLINE void siqs_sieve_large(uint8_t *sieve, uint32_t length,
 #define SIQS_TWO_HIT_LOCAL_LENGTH_THRESHOLD (64U * 1024U)
 #define SIQS_ONE_HIT_SINK_STRIPE_SIZE  4096U
 
+/* Use the lookahead tuned on Axion N4A for Linux AArch64 SVE2 builds. */
+#if defined(__aarch64__) && defined(__linux__) && defined(__ARM_FEATURE_SVE2) && \
+    (defined(__GNUC__) || defined(__clang__)) && !defined(SIQS_DEBUG)
+#define SIQS_ONE_HIT_PREFETCH_DISTANCE 32U
+#endif
+
 /* Apply one root from the one-hit tier.  In release, redirect an
  * out-of-range store to the caller-supplied padding byte. */
 static INLINE void siqs_sieve_one_hit_local(uint8_t *sieve,
@@ -251,7 +257,7 @@ static void siqs_run_sieve_kernel(
   }
   /* Local padding is worthwhile only when ordinary dummy stores scatter
    * widely. M1 Pro screens favored the simpler fixed-hit loop through
-   * 64 KiB, which also covers the default dense blocks. */
+   * 64 KiB. */
   if (length <= SIQS_TWO_HIT_LOCAL_LENGTH_THRESHOLD) {
     SIQS_SIEVE_LARGE_RANGE(length, 2U);
   } else {
@@ -268,6 +274,32 @@ static void siqs_run_sieve_kernel(
      * exceeds length by more than the 4096-byte stripe. The allocation
      * through pmax therefore covers every sink, even for short intervals. */
     uint32_t sink = length;
+    /* Four pairs fit in each eight-byte slice of the rotating stripe.
+     * Leave the scalar tail where a full group or its lookahead cannot fit. */
+#ifdef SIQS_ONE_HIT_PREFETCH_DISTANCE
+    const size_t group_end = end - SIQS_ONE_HIT_PREFETCH_DISTANCE - 3U;
+#else
+    const size_t group_end = end - 3U;
+#endif
+    for (; i < group_end; i += 4U) {
+      size_t j;
+      for (j = 0; j < 4U; j++) {
+        uint32_t pair_sink = sink + 2U * (uint32_t)j;
+#ifdef SIQS_ONE_HIT_PREFETCH_DISTANCE
+        size_t next = i + j + SIQS_ONE_HIT_PREFETCH_DISTANCE;
+        uint32_t future1 = root1[next], future2 = root2[next];
+        __builtin_prefetch(sieve + (future1 < length ? future1 : pair_sink), 1, 3);
+        __builtin_prefetch(sieve + (future2 < length ? future2 : pair_sink + 1U), 1, 3);
+#endif
+        uint32_t a = root1[i + j], b = root2[i + j];
+        siqs_sieve_one_hit_local(sieve, logp[i + j], a, length, pair_sink);
+        if (a != b)
+          siqs_sieve_one_hit_local(sieve, logp[i + j], b, length, pair_sink + 1U);
+      }
+      sink += 8U;
+      if (sink == length + SIQS_ONE_HIT_SINK_STRIPE_SIZE)
+        sink = length;
+    }
     for (; i < end; i++) {
       siqs_sieve_one_hit_local(sieve, logp[i], root1[i], length, sink);
       if (root1[i] != root2[i])
@@ -280,6 +312,7 @@ static void siqs_run_sieve_kernel(
 # undef SIQS_SIEVE_LARGE_RANGE
 }
 
+#undef SIQS_ONE_HIT_PREFETCH_DISTANCE
 
 #ifdef SIQS_SATURATING_KERNEL
 #undef siqs_sieve_add
