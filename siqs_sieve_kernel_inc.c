@@ -13,6 +13,8 @@
 #define siqs_sieve_one_hit_local siqs_sieve_one_hit_local_sat
 #define siqs_sieve_two_hit_local siqs_sieve_two_hit_local_sat
 #define siqs_sieve_two_hit_range siqs_sieve_two_hit_range_sat
+#define siqs_sieve_three_hit_local siqs_sieve_three_hit_local_sat
+#define siqs_sieve_three_hit_range siqs_sieve_three_hit_range_sat
 #define siqs_run_sieve_kernel siqs_run_sieve_kernel_sat
 #endif
 
@@ -175,6 +177,44 @@ static NOINLINE size_t siqs_sieve_two_hit_range(
   return i;
 }
 
+/* For length/3 < p <= length/2, the first two hits always land in
+ * the logical sieve. Keep the optional third hit in the padding stripe. */
+static INLINE void siqs_sieve_three_hit_local(uint8_t *sieve, uint8_t logp,
+                                              uint32_t root, uint32_t p,
+                                              uint32_t length, uint32_t sink) {
+  size_t pos = (size_t)root + p;
+  siqs_sieve_add(sieve + root, logp);
+  siqs_sieve_add(sieve + pos, logp);
+  pos += p;
+#ifdef SIQS_DEBUG
+  if (pos < length)
+    siqs_sieve_add(sieve + pos, logp);
+  (void)sink;
+#else
+  pos = pos < length ? pos : sink;
+  siqs_sieve_add(sieve + pos, logp);
+#endif
+}
+
+static NOINLINE size_t siqs_sieve_three_hit_range(
+    uint8_t *RESTRICT sieve, uint32_t length,
+    const uint32_t *RESTRICT prime, const uint32_t *RESTRICT root1,
+    const uint32_t *RESTRICT root2, const uint8_t *RESTRICT logp,
+    size_t first, size_t end) {
+  size_t i;
+  uint32_t sink = length;
+  for (i = first; i < end && prime[i] <= length / 2U; i++) {
+    siqs_sieve_three_hit_local(sieve, logp[i], root1[i], prime[i], length, sink);
+    if (root1[i] != root2[i])
+      siqs_sieve_three_hit_local(sieve, logp[i], root2[i], prime[i], length,
+                                 sink + 1U);
+    sink += 2U;
+    if (sink == length + SIQS_ONE_HIT_SINK_STRIPE_SIZE)
+      sink = length;
+  }
+  return i;
+}
+
 /* Add prime contributions to already initialized logical sieve bytes.
  * Initialization stays with the caller: the sparse suffix must augment,
  * not erase, the completed dense blocks.  Expose invariant arrays directly
@@ -203,7 +243,12 @@ static void siqs_run_sieve_kernel(
   SIQS_SIEVE_LARGE_RANGE(length / 5U, 6U);
   SIQS_SIEVE_LARGE_RANGE(length / 4U, 5U);
   SIQS_SIEVE_LARGE_RANGE(length / 3U, 4U);
-  SIQS_SIEVE_LARGE_RANGE(length / 2U, 3U);
+  if (length <= SIQS_TWO_HIT_LOCAL_LENGTH_THRESHOLD) {
+    SIQS_SIEVE_LARGE_RANGE(length / 2U, 3U);
+  } else {
+    i = siqs_sieve_three_hit_range(sieve, length, prime, root1, root2, logp,
+                                  i, end);
+  }
   /* Local padding is worthwhile only when ordinary dummy stores scatter
    * widely. M1 Pro screens favored the simpler fixed-hit loop through
    * 64 KiB, which also covers the default dense blocks. */
@@ -244,5 +289,7 @@ static void siqs_run_sieve_kernel(
 #undef siqs_sieve_one_hit_local
 #undef siqs_sieve_two_hit_local
 #undef siqs_sieve_two_hit_range
+#undef siqs_sieve_three_hit_local
+#undef siqs_sieve_three_hit_range
 #undef siqs_run_sieve_kernel
 #endif
