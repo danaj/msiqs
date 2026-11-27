@@ -124,6 +124,16 @@ November 2026 timing results:
 
 With 96 threads on an Intel Xeon 8581C, RSA-100 took 31.0 s and RSA-130 took 4h 13m (379 core-hours).
 
+Preliminary distributed results using 6 n4a-highcpu-64 instances (6 x 64 cores), with host coordination and linear algebra on a MacBook M1 Pro (8 threads):
+- RSA-100  16.4s, 1.0 core-hours
+- RSA-110  1m 41.6s, 7.9 core-hours
+- RSA-120  10m 57.4s, 51.6 core-hours
+- RSA-130  86m 58.3s, 490.3 core-hours  [9m23s Lanczos with 8 threads]
+
+Core hours here include the host and all workers.
+The AMD EPYC Turin cores in the single-machine runs above do more
+SIQS work per core-hour than the Axion cores used here.
+
 More comparisons can be seen in the [benchmarks document](docs/BENCHMARKS.md)
 
 ### Supported range
