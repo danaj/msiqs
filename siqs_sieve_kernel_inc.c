@@ -276,29 +276,48 @@ static void siqs_run_sieve_kernel(
     uint32_t sink = length;
     /* Four pairs fit in each eight-byte slice of the rotating stripe.
      * Leave the scalar tail where a full group or its lookahead cannot fit. */
+    size_t j;
+    uint32_t pair_sink, a, b;
 #ifdef SIQS_ONE_HIT_PREFETCH_DISTANCE
-    const size_t group_end = end - SIQS_ONE_HIT_PREFETCH_DISTANCE - 3U;
-#else
-    const size_t group_end = end - 3U;
-#endif
-    for (; i < group_end; i += 4U) {
-      size_t j;
-      for (j = 0; j < 4U; j++) {
-        uint32_t pair_sink = sink + 2U * (uint32_t)j;
-#ifdef SIQS_ONE_HIT_PREFETCH_DISTANCE
-        size_t next = i + j + SIQS_ONE_HIT_PREFETCH_DISTANCE;
-        uint32_t future1 = root1[next], future2 = root2[next];
-        __builtin_prefetch(sieve + (future1 < length ? future1 : pair_sink), 1, 3);
-        __builtin_prefetch(sieve + (future2 < length ? future2 : pair_sink + 1U), 1, 3);
-#endif
-        uint32_t a = root1[i + j], b = root2[i + j];
-        siqs_sieve_one_hit_local(sieve, logp[i + j], a, length, pair_sink);
-        if (a != b)
-          siqs_sieve_one_hit_local(sieve, logp[i + j], b, length, pair_sink + 1U);
+    if (length >= 1152U * 1024U) {  /* Use prefetch if large enough */
+      const size_t group_end = end - SIQS_ONE_HIT_PREFETCH_DISTANCE - 3U;
+      for (; i < group_end; i += 4U) {
+        for (j = 0; j < 4U; j++) {
+          size_t next;
+          uint32_t future1, future2;
+          pair_sink = sink + 2U * (uint32_t)j;
+          next = i + j + SIQS_ONE_HIT_PREFETCH_DISTANCE;
+          future1 = root1[next];
+          future2 = root2[next];
+          __builtin_prefetch(sieve + (future1 < length ? future1 : pair_sink), 1, 3);
+          __builtin_prefetch(sieve + (future2 < length ? future2 : pair_sink + 1U), 1, 3);
+          a = root1[i + j];
+          b = root2[i + j];
+          siqs_sieve_one_hit_local(sieve, logp[i + j], a, length, pair_sink);
+          if (a != b)
+            siqs_sieve_one_hit_local(sieve, logp[i + j], b, length, pair_sink + 1U);
+        }
+        sink += 8U;
+        if (sink == length + SIQS_ONE_HIT_SINK_STRIPE_SIZE)
+          sink = length;
       }
-      sink += 8U;
-      if (sink == length + SIQS_ONE_HIT_SINK_STRIPE_SIZE)
-        sink = length;
+    } else
+#endif
+    {
+      const size_t group_end = end - 3U;
+      for (; i < group_end; i += 4U) {
+        for (j = 0; j < 4U; j++) {
+          pair_sink = sink + 2U * (uint32_t)j;
+          a = root1[i + j];
+          b = root2[i + j];
+          siqs_sieve_one_hit_local(sieve, logp[i + j], a, length, pair_sink);
+          if (a != b)
+            siqs_sieve_one_hit_local(sieve, logp[i + j], b, length, pair_sink + 1U);
+        }
+        sink += 8U;
+        if (sink == length + SIQS_ONE_HIT_SINK_STRIPE_SIZE)
+          sink = length;
+      }
     }
     for (; i < end; i++) {
       siqs_sieve_one_hit_local(sieve, logp[i], root1[i], length, sink);
