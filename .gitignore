@@ -1,4 +1,7 @@
 /msiqs
+/dmsiqs
+/dmsiqs-worker-*.tar.gz
+/check-dmsiqs-collector
 /bench-lanczos
 /bench-solvers
 /bench-sieve

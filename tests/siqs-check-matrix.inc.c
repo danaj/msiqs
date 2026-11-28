@@ -510,7 +510,7 @@ static void matrix_rng(void) {
   for (i = 0; i < sizeof(vectors) / sizeof(vectors[0]); i++) {
     state = vectors[i].seed;
     for (j = 0; j < 2; j++) {
-      uint64_t mask, *deps = nla_block_lanczos_once(&matrix, &state, &mask, 0);
+      uint64_t mask, *deps = nla_block_lanczos_once(&matrix, &state, &mask, 0, NULL);
       CHECK(state == vectors[i].seed +
             (uint64_t)(j + 1U) * matrix.ncols * increment);
       if (deps != NULL)

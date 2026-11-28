@@ -14,6 +14,11 @@ typedef struct {
   uint32_t orig;
 } la_col_t;
 
+typedef struct {
+  uint64_t iterations;
+  uint32_t threads, attempts;
+} la_lanczos_stats_t;
+
 /* Return the bit showing whether a column belongs to a dependency. */
 static INLINE uint64_t la_get_null_entry(const uint64_t *nullrows,
                                          unsigned long column,
@@ -51,6 +56,18 @@ extern uint64_t *la_block_lanczos_wide(unsigned long nrows,
                                        la_col_t *cols,
                                        uint64_t seed,
                                        uint64_t *mask, int verbose);
+
+/* Optional diagnostics for one solve. Stats include all internal attempts
+ * and the actual thread count. An empty matrix reports zero for each field.
+ * Serial builds use one thread regardless of the requested count. */
+extern uint64_t *la_block_lanczos_report(unsigned long nrows,
+                                        unsigned long dense_rows,
+                                        unsigned long ncols,
+                                        const la_col_t *cols,
+                                        uint64_t seed, uint64_t *mask,
+                                        int retain_all_rows, int verbose,
+                                        uint32_t nthreads,
+                                        la_lanczos_stats_t *stats);
 
 #ifdef PSIQS
 /* Use a per-solve worker pool for large unpacked matrices; otherwise serial. */

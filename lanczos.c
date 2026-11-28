@@ -35,6 +35,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "lanczos.h"
 
@@ -50,6 +51,7 @@
 
 #define NLA_EXTRA_COLUMNS 64UL
 #define NLA_MAX_ATTEMPTS 100U
+#define NLA_PROGRESS_SECONDS 60.0
 
 /* Measured serial defaults: unpacked columns generally win on x86, while
  * packing helps ARM through roughly 18K columns.  Match the sieve-block
@@ -329,8 +331,8 @@ void la_reduce_matrix(unsigned long *nrows, unsigned long *ncols,
   }
   *ncols = i;
 
-  if (verbose > 0) {
-    printf("Lanczos reduced to %lu active rows x %lu columns\n",
+  if (verbose > 2) {
+    printf("# siqs matrix reduced to %lu active rows x %lu columns\n",
            live_rows, *ncols);
     fflush(stdout);
   }
@@ -833,9 +835,9 @@ static void nla_matrix_init(nla_matrix_t *matrix,
                  ((double)matrix->sparse_rows + 1.0) *
                      sizeof(*matrix->row_offsets) +
                  2.0 * (double)ncols * sizeof(uint64_t)) / 1048576.0;
-    printf("Lanczos packed %lu x %lu matrix: %u post rows, "
+    printf("# siqs Lanczos packed %lu x %lu matrix: %u post rows, "
            "%u packed-dense rows, %u sparse rows and %lu entries "
-           "(%.1f MB)\n",
+           "(%.1f MiB)\n",
            matrix->iteration_rows, ncols, matrix->post_rows,
            matrix->packed_dense_rows, matrix->sparse_rows,
            (unsigned long)offset, mb);
@@ -1488,9 +1490,22 @@ static int nla_all_zero(const uint64_t *matrix) {
   return 1;
 }
 
+static double nla_wall_now(void) {
+#ifdef CLOCK_MONOTONIC
+  struct timespec now;
+  if (clock_gettime(CLOCK_MONOTONIC, &now) == 0)
+    return (double)now.tv_sec + (double)now.tv_nsec * 1e-9;
+  return -1.0;
+#else
+  time_t now = time(NULL);
+  return now == (time_t)-1 ? -1.0 : (double)now;
+#endif
+}
+
 static uint64_t *nla_block_lanczos_once(const nla_matrix_t *matrix,
                                         uint64_t *rng_state,
-                                        uint64_t *result_mask, int verbose) {
+                                        uint64_t *result_mask, int verbose,
+                                        la_lanczos_stats_t *stats) {
   uint64_t *v[3], *vnext, *x, *initial;
   uint64_t *row_scratch, *table;
   uint64_t winv_store[3][64], vt_a_v_store[2][64];
@@ -1501,6 +1516,8 @@ static uint64_t *nla_block_lanczos_once(const nla_matrix_t *matrix,
   unsigned int dim0 = 0, dim1 = 64U;
   uint64_t mask0 = 0, mask1 = UINT64_MAX;
   unsigned long i, iteration = 0, dimensions_solved = 0;
+  double started = verbose > 1 ? nla_wall_now() : -1.0;
+  double next_report = started + NLA_PROGRESS_SECONDS;
   int failed = 0;
 
   *result_mask = 0;
@@ -1536,6 +1553,14 @@ static uint64_t *nla_block_lanczos_once(const nla_matrix_t *matrix,
 
   for (;;) {
     uint64_t *swap;
+    if (started >= 0.0 && (iteration & 7UL) == 0) {
+      double now = nla_wall_now();
+      if (now >= next_report) {
+        printf("# siqs Lanczos %.0f s into attempt, %lu iterations\n", now - started, iteration);
+        fflush(stdout);
+        next_report = now + NLA_PROGRESS_SECONDS;
+      }
+    }
     iteration++;
     nla_matrix_mul_symmetric(matrix, v[0], vnext, row_scratch, table);
     nla_solver_inner_product(matrix, v[0], vnext, vt_a_v[0], table);
@@ -1629,10 +1654,13 @@ static uint64_t *nla_block_lanczos_once(const nla_matrix_t *matrix,
     }
   }
 
-  if (verbose > 0) {
-    printf("Lanczos %s after %lu iterations (dimension %lu)%s\n",
-           failed ? "failed" : "completed",
-           iteration, dimensions_solved, failed ? ", retrying" : "");
+  if (stats != NULL) {
+    stats->iterations += (uint64_t)iteration;
+    ++stats->attempts;
+  }
+  if (verbose > 2) {
+    printf("# siqs Lanczos attempt %s after %lu iterations (dimension %lu)\n",
+           failed ? "failed" : "completed", iteration, dimensions_solved);
     fflush(stdout);
   }
 
@@ -1698,18 +1726,22 @@ static uint64_t *nla_block_lanczos_once(const nla_matrix_t *matrix,
 static uint64_t *nla_block_lanczos(unsigned long nrows,
                                   unsigned long dense_rows,
                                   unsigned long ncols,
-                                  la_col_t *cols,
+                                  const la_col_t *cols,
                                   uint64_t seed,
                                   uint64_t *mask,
                                   unsigned int post_rows,
-                                  int verbose, uint32_t nthreads) {
+                                  int verbose, uint32_t nthreads,
+                                  la_lanczos_stats_t *stats) {
   nla_matrix_t matrix;
   uint64_t *result = NULL;
   uint64_t rng_state = seed;
+  uint32_t actual_threads = 1U;
   unsigned int attempt;
 
   if (verbose < 0)
     verbose = 0;
+  if (stats != NULL)
+    memset(stats, 0, sizeof(*stats));
   *mask = 0;
   if (ncols == 0)
     return NULL;
@@ -1730,22 +1762,28 @@ static uint64_t *nla_block_lanczos(unsigned long nrows,
                     nthreads, verbose);
 #ifdef PSIQS
   matrix.pool = nla_pool_create(&matrix, nthreads);
-  if (matrix.pool != NULL && verbose > 0) {
-    printf("Lanczos using %u threads\n", matrix.pool->nthreads);
+  if (matrix.pool != NULL)
+    actual_threads = matrix.pool->nthreads;
+#endif
+  if (stats != NULL)
+    stats->threads = actual_threads;
+  if (verbose > 0) {
+    printf("# siqs Lanczos%s using %u thread%s\n",
+           post_rows == 0 ? " with all rows" : "", actual_threads,
+           actual_threads == 1U ? "" : "s");
     fflush(stdout);
   }
-#endif
   for (attempt = 0; attempt < NLA_MAX_ATTEMPTS; attempt++) {
-    result = nla_block_lanczos_once(&matrix, &rng_state, mask, verbose);
+    result = nla_block_lanczos_once(&matrix, &rng_state, mask, verbose, stats);
     if (result != NULL && *mask != 0)
       break;
     free(result);
     result = NULL;
     if (verbose > 0) {
       if (attempt + 1U < NLA_MAX_ATTEMPTS)
-        printf("linear algebra retry %u\n", attempt + 1U);
+        printf("# siqs Lanczos retrying after attempt %u\n", attempt + 1U);
       else
-        printf("linear algebra exhausted %u attempts\n", NLA_MAX_ATTEMPTS);
+        printf("# siqs Lanczos exhausted %u attempts\n", NLA_MAX_ATTEMPTS);
       fflush(stdout);
     }
   }
@@ -1756,14 +1794,27 @@ static uint64_t *nla_block_lanczos(unsigned long nrows,
   return result;
 }
 
+uint64_t *la_block_lanczos_report(unsigned long nrows,
+                                  unsigned long dense_rows,
+                                  unsigned long ncols,
+                                  const la_col_t *cols,
+                                  uint64_t seed, uint64_t *mask,
+                                  int retain_all_rows, int verbose,
+                                  uint32_t nthreads,
+                                  la_lanczos_stats_t *stats) {
+  return nla_block_lanczos(nrows, dense_rows, ncols, cols, seed, mask,
+                           retain_all_rows ? 0U : NLA_POST_ROWS, verbose,
+                           nthreads, stats);
+}
+
 uint64_t *la_block_lanczos(unsigned long nrows,
                            unsigned long dense_rows,
                            unsigned long ncols,
                            la_col_t *cols,
                            uint64_t seed,
                            uint64_t *mask, int verbose) {
-  return nla_block_lanczos(nrows, dense_rows, ncols, cols,
-                           seed, mask, NLA_POST_ROWS, verbose, 1U);
+  return la_block_lanczos_report(nrows, dense_rows, ncols, cols, seed, mask,
+                                  0, verbose, 1U, NULL);
 }
 
 uint64_t *la_block_lanczos_wide(unsigned long nrows,
@@ -1772,8 +1823,8 @@ uint64_t *la_block_lanczos_wide(unsigned long nrows,
                                 la_col_t *cols,
                                 uint64_t seed,
                                 uint64_t *mask, int verbose) {
-  return nla_block_lanczos(nrows, dense_rows, ncols, cols,
-                           seed, mask, 0U, verbose, 1U);
+  return la_block_lanczos_report(nrows, dense_rows, ncols, cols, seed, mask,
+                                  1, verbose, 1U, NULL);
 }
 
 #ifdef PSIQS
@@ -1785,7 +1836,7 @@ uint64_t *la_block_lanczos_threaded(unsigned long nrows,
                                     uint64_t *mask,
                                     int retain_all_rows, int verbose,
                                     uint32_t nthreads) {
-  return nla_block_lanczos(nrows, dense_rows, ncols, cols, seed, mask,
-                           retain_all_rows ? 0U : NLA_POST_ROWS, verbose, nthreads);
+  return la_block_lanczos_report(nrows, dense_rows, ncols, cols, seed, mask,
+                                  retain_all_rows, verbose, nthreads, NULL);
 }
 #endif

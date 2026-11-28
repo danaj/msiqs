@@ -39,6 +39,13 @@ def rewrite(data,frame,changes=None,payload=None):
  struct.pack_into('<I',header,52,zlib.crc32(payload,zlib.crc32(header[:52])))
  return data[:start]+header+payload+data[end:]
 
+def metadata_frame(prefix,kind,payload,count=1,delay_us=0,next_run=False):
+ previous=frames(prefix)[-1]
+ fields=previous[2]
+ elapsed=delay_us if next_run else fields[7]+delay_us
+ changes={1:kind,2:fields[2]+1,4:count,5:fields[5]+int(next_run),6:fields[6]+delay_us,7:elapsed}
+ return rewrite(prefix,previous,changes,payload)[previous[0]:]
+
 with tempfile.TemporaryDirectory(prefix='journal-info-',dir=RESULTS) as directory:
  tmp=Path(directory);path=tmp/'complete.journal'
  subprocess.run([str(EXE),'-t','1','--journal',str(path),str(ONE)],stdout=subprocess.DEVNULL,check=True)
@@ -182,6 +189,116 @@ with tempfile.TemporaryDirectory(prefix='journal-info-',dir=RESULTS) as director
  assert fast['relation_count']==inspect(eta)['relation_count']
  assert fast['contexts'][0]['rate']==rate and fast['contexts'][0]['snapshot']==ctx['snapshot']
  check('ETA uses same-run/context monotonic progress')
+ solve=tmp/'solve.journal';payload=info.SOLVE.pack(100,103,250,18000000,563000000,12000,77,2,8,1,32,9,1)
+ solve.write_bytes(eta_data+metadata_frame(eta_data,7,payload,delay_us=581012000))
+ report=inspect(solve,True);baseline=inspect(eta,True)
+ assert report['solves'][:-1]==baseline['solves']
+ assert report['solves'][-1]==dict(context=1,run=0,method=2,method_name='Lanczos',rows=100,columns=103,
+                                 nonzeros=250,matrix_us=18000000,solver_us=563000000,dependency_us=12000,
+                                 iterations=77,threads=8,attempts=1,dependencies_returned=32,
+                                 dependencies_tested=9,factor_found=True)
+ assert report['byte_breakdown']['solve_metadata']==baseline['byte_breakdown'].get('solve_metadata',0)+len(payload)
+ assert report['contexts']==baseline['contexts'] and report['relations']==baseline['relations']
+ assert report['relation_congruences_verified']==baseline['relation_congruences_verified']
+ assert inspect(solve,eta_only=True)['contexts'][0]['rate']==rate
+ text=cli(solve).stdout
+ assert 'Lanczos, 100 x 103, 250 nonzeros, 8 threads' in text and '9/32 dependencies tested' in text
+ attempt_end=next(frame for frame in ff if frame[2][1]==4)
+ prefix=data[:attempt_end[0]]
+ tail=b''.join(rewrite(data,frame,{2:frame[2][2]+1})[frame[0]:frame[1]]
+               for frame in ff[attempt_end[2][2]:])
+ solve.write_bytes(prefix+metadata_frame(prefix,7,payload)+tail)
+ report=inspect(solve,True)
+ assert report['returned_partitions']==result['returned_partitions'] and report['job_end']==result['job_end']
+ check('SOLVE fields, solver display and byte accounting preserve relation progress and factors')
+ bad=tmp/'bad-solve.journal'
+ for prefix,record,count,error in (
+     (eta_data,payload[:-1],1,'invalid SOLVE count or payload size'),
+     (eta_data,payload,2,'invalid SOLVE count or payload size'),
+     (eta_data,info.SOLVE.pack(100,103,250,0,0,0,0,1,1,0,3,4,0),1,'invalid SOLVE dependency counts or result'),
+     (data[:ff[0][1]],payload,1,'SOLVE outside active context')):
+  bad.write_bytes(prefix+metadata_frame(prefix,7,record,count))
+  assert error in cli(bad,'--eta',ok=False).stderr
+ check('SOLVE frames reject malformed payloads and placement even in compact ETA mode')
+ collection=tmp/'collection.journal';payload=info.COLLECTION.pack(1250000,302500000,12250000,125000)
+ collection.write_bytes(eta_data+metadata_frame(eta_data,8,payload,delay_us=316125000))
+ report=inspect(collection,True)
+ assert report['collections'][:-1]==baseline['collections']
+ assert report['collections'][-1]==dict(context=1,run=0,startup_us=1250000,collection_us=302500000,
+                                       waiting_us=12250000,drain_us=125000)
+ assert report['byte_breakdown']['collection_metadata']==baseline['byte_breakdown'].get('collection_metadata',0)+len(payload)
+ assert report['contexts']==baseline['contexts'] and report['relations']==baseline['relations']
+ assert report['relation_congruences_verified']==baseline['relation_congruences_verified']
+ assert inspect(collection,eta_only=True)['contexts'][0]['rate']==rate
+ assert 'startup 1.250s, collection 302.500s, waiting 12.250s, drain 0.125s' in cli(collection).stdout
+ prefix=data[:attempt_end[0]]
+ collection.write_bytes(prefix+metadata_frame(prefix,8,payload)+tail)
+ report=inspect(collection,True)
+ assert report['returned_partitions']==result['returned_partitions'] and report['job_end']==result['job_end']
+ check('COLLECTION phases, display and byte accounting preserve relation progress and factors')
+ bad=tmp/'bad-collection.journal'
+ for prefix,record,count,error in (
+     (eta_data,payload[:-1],1,'invalid COLLECTION count or payload size'),
+     (eta_data,payload,2,'invalid COLLECTION count or payload size'),
+     (data[:ff[0][1]],payload,1,'COLLECTION outside active context'),
+     (data[:attempt_end[1]],payload,1,'COLLECTION outside active context')):
+  bad.write_bytes(prefix+metadata_frame(prefix,8,record,count))
+  assert error in cli(bad,'--eta',ok=False).stderr
+ check('COLLECTION frames reject malformed payloads and placement even in compact ETA mode')
+ accounting=tmp/'accounting.journal'
+ cpu=info.ACCOUNTING.pack
+ checkpoint=cpu(900000000,0,0,0,40<<20,3,1,2,0)
+ final=cpu(3000000000,600000000,36000000,3600000,72<<20,3,3,0,3)
+ next_final=cpu(700000000,200000000,24000000,2400000,52<<20,1,1,0,3)
+ saved=eta_data+metadata_frame(eta_data,9,checkpoint,delay_us=900000000)
+ accounting.write_bytes(saved+metadata_frame(saved,9,next_final,next_run=True))
+ partial=inspect(accounting,True)['accounting']
+ assert (partial['final_runs'],partial['host_cpu_runs'],partial['runs'],partial['journal_runs'])==(1,1,2,2)
+ assert partial['partial'] and partial['checkpointed_jobs']==2
+ saved+=metadata_frame(saved,9,final)
+ accounting.write_bytes(saved+metadata_frame(saved,9,next_final,next_run=True))
+ report=inspect(accounting,True)
+ measured=report['accounting']
+ assert measured==dict(worker_user_us=3700000000,worker_system_us=800000000,
+                       host_user_us=60000000,host_system_us=6000000,peak_rss_bytes=72<<20,
+                       jobs=4,timed_jobs=4,checkpointed_jobs=0,runs=2,final_runs=2,host_cpu_runs=2,
+                       journal_runs=2,partial=False)
+ assert json.loads(cli(accounting,'--json').stdout)['accounting']==measured
+ assert report['byte_breakdown']['accounting_metadata']==3*info.ACCOUNTING.size
+ assert report['contexts']==baseline['contexts'] and report['relations']==baseline['relations']
+ assert report['relation_congruences_verified']==baseline['relation_congruences_verified']
+ assert inspect(accounting,eta_only=True)['contexts'][0]['rate']==rate
+ text=cli(accounting).stdout
+ assert 'CPU accounting (complete) 1.250000 worker core-hours' in text and 'peak host RSS 72.0 MiB' in text
+ assert baseline['accounting'] is None
+ check('ACCOUNTING uses the latest snapshot per run and preserves relation progress')
+ accounting.write_bytes(eta_data+metadata_frame(eta_data,9,next_final,next_run=True))
+ missing=inspect(accounting)['accounting']
+ assert missing['runs']==missing['final_runs']==missing['host_cpu_runs']==1 and missing['journal_runs']==2
+ assert missing['partial']
+ for record in (cpu(1,0,0,0,0,1,1,0,2), cpu(1,0,1,0,0,2,1,1,3)):
+  accounting.write_bytes(eta_data+metadata_frame(eta_data,9,record))
+  assert inspect(accounting)['accounting']['partial']
+  assert 'CPU accounting (partial)' in cli(accounting).stdout
+ last=ff[-1];prefix=data[:last[0]]
+ tail=rewrite(data,last,{2:last[2][2]+1})[last[0]:]
+ accounting.write_bytes(prefix+metadata_frame(prefix,9,final)+tail)
+ report=inspect(accounting,True)
+ assert report['returned_partitions']==result['returned_partitions'] and report['job_end']==result['job_end']
+ check('ACCOUNTING shows incomplete invocation or CPU coverage and preserves final factors')
+ bad=tmp/'bad-accounting.journal'
+ for prefix,record,count,next_run,error in (
+     (eta_data,checkpoint[:-1],1,False,'invalid ACCOUNTING count or payload size'),
+     (eta_data,checkpoint,2,False,'invalid ACCOUNTING count or payload size'),
+     (eta_data,cpu(0,0,0,0,0,0,0,0,4),1,False,'invalid ACCOUNTING flags'),
+     (eta_data,cpu(0,0,1,0,0,0,0,0,0),1,False,'host times without host CPU flag'),
+     (eta_data,cpu(0,0,0,0,0,2,2,1,0),1,False,'invalid ACCOUNTING job counts'),
+     (data[:ff[0][1]],checkpoint,1,False,'ACCOUNTING checkpoint outside BATCH boundary'),
+     (eta_data,checkpoint,1,True,'ACCOUNTING checkpoint outside BATCH boundary'),
+     (data,final,1,False,'frame after final job record')):
+  bad.write_bytes(prefix+metadata_frame(prefix,9,record,count,next_run=next_run))
+  assert error in cli(bad,'--eta',ok=False).stderr
+ check('ACCOUNTING rejects malformed payloads and checkpoint placement even in compact ETA mode')
  live=tmp/'live.journal'
  with (tmp/'collector.log').open('w') as collector_log,(tmp/'follow.log').open('w') as follow_log:
   collector=subprocess.Popen([str(EXE),'-t','1','--journal',str(live),str(TWO)],stdout=collector_log,stderr=collector_log)

@@ -73,6 +73,9 @@ def splitter_counter_compatibility(data, proof):
 RESULTS.mkdir(exist_ok=True)
 print('Journal test artifacts:', RESULTS, flush=True)
 step('eta-model',[sys.executable,'-u',str(FIXTURES/'test-eta.py')])
+step('build-space-check',['cc','-O1','-o',str(RESULTS/'journal-space-check'),
+                          str(FIXTURES/'journal-space-check.c')])
+step('journal-space-check',[str(RESULTS/'journal-space-check')])
 step('build',['perl','tools/build-siqs.pl','--output',str(EXE)]+SOURCES,BUILD)
 step('build-serial',['perl','tools/build-siqs.pl','--serial','--output',str(RESULTS/'msiqs-serial'),
                      '--cflags','-O2 -falign-loops=32']+SOURCES,BUILD)

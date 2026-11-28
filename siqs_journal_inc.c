@@ -10,8 +10,10 @@
 # include <sys/stat.h>
 # include <share.h>
 #else
+# include <sys/statvfs.h>
 # include <sys/types.h>
 # include <unistd.h>
+# include "siqs_journal_space_inc.c"
 #endif
 
 #ifndef SIQS_JOURNAL_BATCH_BYTES
@@ -22,8 +24,18 @@
 #define SJ_HEADER 56U
 #define SJ_MAGIC UINT32_C(0x4b4c424a)
 #define SJ_VERSION 2U
-enum { SJ_INPUT = 1, SJ_CONTEXT, SJ_BATCH, SJ_ATTEMPT_END, SJ_RETURN, SJ_JOB_END };
+enum {
+  SJ_INPUT = 1, SJ_CONTEXT, SJ_BATCH, SJ_ATTEMPT_END,
+  SJ_RETURN, SJ_JOB_END, SJ_SOLVE, SJ_COLLECTION, SJ_ACCOUNTING
+};
+#define SJ_SOLVE_BYTES (7U * 8U + 6U * 4U)
+#define SJ_COLLECTION_BYTES (4U * 8U)
+#define SJ_ACCOUNTING_BYTES (8U * 8U + 4U)
+enum { SJ_ACCOUNTING_HOST_CPU = 1U, SJ_ACCOUNTING_FINAL = 2U };
 enum { SJ_RELATION = 1, SJ_FAMILY };
+#ifdef DMSIQS
+enum { SJ_CHECKPOINT_NONE, SJ_CHECKPOINT_UTC, SJ_CHECKPOINT_MONOTONIC };
+#endif
 static const unsigned char sj_preamble[16] = {
   'M','P','U','S','I','Q','J',0,
   (unsigned char)SJ_VERSION, (unsigned char)(SJ_VERSION >> 8),
@@ -32,18 +44,41 @@ static const unsigned char sj_preamble[16] = {
 };
 typedef struct { unsigned char *data; size_t size, alloc; } sj_buffer;
 typedef struct { const unsigned char *data; size_t left; } sj_reader;
+typedef struct {
+  uint64_t worker_user_us, worker_system_us, host_user_us, host_system_us;
+  uint64_t peak_rss_bytes, jobs, timed_jobs, checkpointed_jobs;
+  uint32_t flags;
+} sj_accounting;
+#ifdef DMSIQS
+typedef struct {
+  sj_accounting usage;
+  uint64_t runs, final_runs, host_cpu_runs, journal_runs;
+} sj_accounting_totals;
+#endif
 struct siqs_journal_t {
   FILE *file;
   char *path;
   uint64_t sequence, append_offset, families;
   uint64_t run, mono_start, last_checkpoint;
   int have_run, writing_run, clock_started;
+#ifdef DMSIQS
+  uint64_t checkpoint_time;
+  int checkpoint_clock, defer_flush;
+  sj_accounting_totals accounting;
+  sj_accounting latest_accounting;
+  uint64_t accounting_run;
+  int have_accounting;
+#endif
 #ifdef _WIN32
   uint64_t clock_frequency;
+#else
+  sj_space_state space;
 #endif
   unsigned char *frame;
   uint32_t frame_type, frame_size, frame_count;
-  int reading, read_only, have_frame, replaying, need_position;
+  uint32_t previous_frame_type;
+  uint64_t previous_frame_run;
+  int reading, read_only, have_frame, replaying, need_position, announced;
   sj_buffer batch;
   uint32_t events;
   unsigned lp_bytes;
@@ -112,6 +147,31 @@ static uint64_t sj_tell(siqs_journal_t *j) {
   if (at < 0) sj_error(j, "cannot obtain file position");
   return (uint64_t)at;
 }
+#ifndef _WIN32
+static void sj_check_space(siqs_journal_t *j, uint64_t now, uint64_t next_frame_bytes) {
+  struct statvfs stats;
+  uint64_t available = UINT64_MAX, committed, checkpoint_bytes = SJ_TLP_BATCH_BYTES + SJ_HEADER;
+  double minutes_left, bytes_per_minute;
+  enum sj_space_warning warning;
+
+  if (j->reading || j->read_only || !sj_space_due(&j->space, now)) return;
+  if (fstatvfs(fileno(j->file), &stats) == 0) {
+    uint64_t unit = stats.f_frsize != 0 ? stats.f_frsize : stats.f_bsize;
+    if (unit != 0 && stats.f_bavail <= UINT64_MAX / unit)
+      available = (uint64_t)stats.f_bavail * unit;
+  }
+  committed = j->need_position ? j->append_offset : sj_tell(j);
+  if (next_frame_bytes > checkpoint_bytes) checkpoint_bytes = next_frame_bytes;
+  warning = sj_space_update(&j->space, now, committed, available, checkpoint_bytes,
+                            &minutes_left, &bytes_per_minute);
+  if (warning == SJ_SPACE_WARN_RATE)
+    fprintf(stderr, "SIQS journal %s: low disk space, %.1f MiB free, about %.1f min at %.1f MiB/min.\n",
+            j->path, available / 1048576.0, minutes_left, bytes_per_minute / 1048576.0);
+  else if (warning == SJ_SPACE_WARN_CHECKPOINT)
+    fprintf(stderr, "SIQS journal %s: low disk space, %.1f MiB free, below the %.1f MiB checkpoint allowance.\n",
+            j->path, available / 1048576.0, checkpoint_bytes / 1048576.0);
+}
+#endif
 static void sj_position(siqs_journal_t *j) {
   if (!j->need_position) return;
   /* Discard only an incomplete final frame, never a complete bad checksum.
@@ -238,12 +298,76 @@ static void sj_done(sj_reader *r) {
   if (r->left != 0) croak("SIQS journal: unexpected trailing payload");
 }
 static void sj_consume(siqs_journal_t *j) {
+  j->previous_frame_type = j->frame_type;
+  j->previous_frame_run = j->run;
   free(j->frame); j->frame = NULL; j->have_frame = 0;
 }
-static int sj_peek(siqs_journal_t *j) {
+#ifdef DMSIQS
+static uint64_t sj_accounting_sum(uint64_t total, uint64_t sample) {
+  return total > UINT64_MAX - sample ? UINT64_MAX : total + sample;
+}
+static void sj_merge_accounting(sj_accounting_totals *total, const sj_accounting *sample) {
+  sj_accounting *usage = &total->usage;
+  usage->worker_user_us = sj_accounting_sum(usage->worker_user_us, sample->worker_user_us);
+  usage->worker_system_us = sj_accounting_sum(usage->worker_system_us, sample->worker_system_us);
+  if (sample->flags & SJ_ACCOUNTING_HOST_CPU) {
+    total->host_cpu_runs++;
+    usage->host_user_us = sj_accounting_sum(usage->host_user_us, sample->host_user_us);
+    usage->host_system_us = sj_accounting_sum(usage->host_system_us, sample->host_system_us);
+  }
+  if (sample->flags & SJ_ACCOUNTING_FINAL) total->final_runs++;
+  if (sample->peak_rss_bytes > usage->peak_rss_bytes)
+    usage->peak_rss_bytes = sample->peak_rss_bytes;
+  usage->jobs = sj_accounting_sum(usage->jobs, sample->jobs);
+  usage->timed_jobs = sj_accounting_sum(usage->timed_jobs, sample->timed_jobs);
+  usage->checkpointed_jobs = sj_accounting_sum(usage->checkpointed_jobs, sample->checkpointed_jobs);
+  usage->flags |= sample->flags;
+  total->runs++;
+}
+static void sj_record_accounting(siqs_journal_t *j, const sj_accounting *sample) {
+  /* One process writes each run in sequence. Keep its latest snapshot
+   * separate so another snapshot can replace all of its counters. */
+  if (j->have_accounting && j->accounting_run != j->run)
+    sj_merge_accounting(&j->accounting, &j->latest_accounting);
+  j->latest_accounting = *sample;
+  j->accounting_run = j->run;
+  j->have_accounting = 1;
+}
+#endif
+static void sj_read_accounting(siqs_journal_t *j) {
+  sj_reader r = {j->frame, j->frame_size};
+  sj_accounting sample;
+  if (j->frame_count != 1 || j->frame_size != SJ_ACCOUNTING_BYTES)
+    sj_error(j, "invalid accounting snapshot size or count");
+  sample.worker_user_us = sj_get64(&r);
+  sample.worker_system_us = sj_get64(&r);
+  sample.host_user_us = sj_get64(&r);
+  sample.host_system_us = sj_get64(&r);
+  sample.peak_rss_bytes = sj_get64(&r);
+  sample.jobs = sj_get64(&r);
+  sample.timed_jobs = sj_get64(&r);
+  sample.checkpointed_jobs = sj_get64(&r);
+  sample.flags = sj_get32(&r);
+  if (sample.flags & ~(uint32_t)(SJ_ACCOUNTING_HOST_CPU | SJ_ACCOUNTING_FINAL))
+    sj_error(j, "invalid accounting snapshot flags");
+  if (!(sample.flags & SJ_ACCOUNTING_HOST_CPU) &&
+      (sample.host_user_us != 0 || sample.host_system_us != 0))
+    sj_error(j, "host CPU without accounting snapshot flag");
+  if (sample.timed_jobs > sample.jobs ||
+      sample.checkpointed_jobs > sample.jobs - sample.timed_jobs)
+    sj_error(j, "invalid accounting snapshot job counts");
+  if (!j->previous_frame_type || j->previous_frame_type == SJ_JOB_END ||
+      (!(sample.flags & SJ_ACCOUNTING_FINAL) &&
+       (j->previous_frame_type != SJ_BATCH || j->previous_frame_run != j->run)))
+    sj_error(j, "unexpected accounting snapshot position");
+#ifdef DMSIQS
+  sj_record_accounting(j, &sample);
+#endif
+}
+static int sj_read_frame(siqs_journal_t *j) {
   unsigned char header[SJ_HEADER];
   sj_reader h;
-  uint64_t start, sequence, run;
+  uint64_t start, sequence, run, utc;
   uint32_t magic, header_crc, crc;
   size_t got; int incomplete = 0;
   if (j->have_frame) return 1;
@@ -257,12 +381,13 @@ static int sj_peek(siqs_journal_t *j) {
   magic = sj_get32(&h); j->frame_type = sj_get32(&h);
   sequence = sj_get64(&h); j->frame_size = sj_get32(&h);
   j->frame_count = sj_get32(&h); run = sj_get64(&h);
-  (void)sj_get64(&h); (void)sj_get64(&h); /* Clocks are informational. */
+  utc = sj_get64(&h);
+  (void)sj_get64(&h); /* Elapsed time is informational. */
   header_crc = sj_get32(&h); crc = sj_get32(&h);
   if ((sj_crc(UINT32_MAX, header, 48) ^ UINT32_MAX) != header_crc)
     sj_error(j, "frame header checksum mismatch");
   if (magic != SJ_MAGIC || sequence != j->sequence ||
-      j->frame_size > SJ_MAX_FRAME || j->frame_type < SJ_INPUT || j->frame_type > SJ_JOB_END)
+      j->frame_size > SJ_MAX_FRAME || j->frame_type < SJ_INPUT || j->frame_type > SJ_ACCOUNTING)
     sj_error(j, "invalid frame header, version, or sequence");
   j->frame = (unsigned char *)siqs_malloc(j->frame_size ? j->frame_size : 1U);
   got = fread(j->frame, 1, j->frame_size, j->file);
@@ -275,10 +400,26 @@ static int sj_peek(siqs_journal_t *j) {
     sj_error(j, "invalid run counter sequence");
   j->run = run; j->have_run = 1;
   if (j->sequence == UINT64_MAX) sj_error(j, "frame sequence exhausted");
+#ifdef DMSIQS
+  if (j->frame_type == SJ_BATCH) {
+    j->checkpoint_time = utc;
+    j->checkpoint_clock = SJ_CHECKPOINT_UTC;
+  }
+#else
+  (void)utc;
+#endif
   j->sequence++; j->have_frame = 1; return 1;
 tail:
   if (incomplete) fprintf(stderr, "# siqs journal: ignoring incomplete final frame in %s\n", j->path);
   clearerr(j->file); j->reading = 0; j->append_offset = start; j->need_position = 1;
+  return 0;
+}
+static int sj_peek(siqs_journal_t *j) {
+  while (sj_read_frame(j)) {
+    if (j->frame_type != SJ_ACCOUNTING) return 1;
+    sj_read_accounting(j);
+    sj_consume(j);
+  }
   return 0;
 }
 static void sj_write(siqs_journal_t *j, uint32_t type, uint32_t count, const sj_buffer *b) {
@@ -289,6 +430,9 @@ static void sj_write(siqs_journal_t *j, uint32_t type, uint32_t count, const sj_
   if (j->sequence == UINT64_MAX) sj_error(j, "frame sequence exhausted");
   sj_position(j);
   now = sj_clock_us(j, 1);
+#ifndef _WIN32
+  sj_check_space(j, now, SJ_HEADER + (uint64_t)b->size);
+#endif
   if (!j->clock_started) {
     j->mono_start = now; j->last_checkpoint = now; j->clock_started = 1;
   }
@@ -306,10 +450,49 @@ static void sj_write(siqs_journal_t *j, uint32_t type, uint32_t count, const sj_
   crc = sj_crc(sj_crc(UINT32_MAX, header.data, header.size), b->data, b->size) ^ UINT32_MAX;
   sj_u32(&header, crc);
   if (fwrite(header.data, 1, header.size, j->file) != header.size ||
-      fwrite(b->data, 1, b->size, j->file) != b->size || fflush(j->file) != 0)
-    sj_error(j, "write or flush failed");
+      fwrite(b->data, 1, b->size, j->file) != b->size || fflush(j->file) != 0) {
+    int error = errno;
+    if (j->sequence != 0 && (error == ENOSPC
+#ifdef EDQUOT
+                            || error == EDQUOT
+#endif
+                            ))
+      croak("SIQS journal %s: write or flush failed: %s. Free space and resume with this journal.",
+            j->path, strerror(error));
+    croak("SIQS journal %s: write or flush failed: %s", j->path, strerror(error));
+  }
   free(header.data); j->sequence++;
 }
+#ifdef DMSIQS
+static void sj_write_accounting(siqs_journal_t *j, const sj_accounting *sample) {
+  sj_buffer b = {NULL, 0, 0};
+  if (j == NULL) return;
+  sj_u64(&b, sample->worker_user_us);
+  sj_u64(&b, sample->worker_system_us);
+  sj_u64(&b, sample->host_user_us);
+  sj_u64(&b, sample->host_system_us);
+  sj_u64(&b, sample->peak_rss_bytes);
+  sj_u64(&b, sample->jobs);
+  sj_u64(&b, sample->timed_jobs);
+  sj_u64(&b, sample->checkpointed_jobs);
+  sj_u32(&b, sample->flags);
+  sj_write(j, SJ_ACCOUNTING, 1, &b);
+  free(b.data);
+  sj_record_accounting(j, sample);
+}
+static void sj_get_accounting(siqs_journal_t *j, sj_accounting_totals *total) {
+  if (j == NULL) {
+    memset(total, 0, sizeof(*total));
+    return;
+  }
+  /* A final snapshot can follow RETURN. Preserve the next nonmetadata
+   * frame so the caller can still compare and consume JOB_END. */
+  (void)sj_peek(j);
+  *total = j->accounting;
+  if (j->have_accounting) sj_merge_accounting(total, &j->latest_accounting);
+  total->journal_runs = j->have_run ? j->run + 1 : 0;
+}
+#endif
 static sj_reader sj_frame_reader(const siqs_journal_t *j) {
   sj_reader r; r.data = j->frame; r.left = j->frame_size; return r;
 }
@@ -525,7 +708,39 @@ static void sj_flush(siqs_ctx_t *ctx) {
   j->batch.size = 0; j->events = 0;
   if (ctx->params.max_large_primes == 3)
     j->last_checkpoint = sj_clock_us(j, 1);
+#ifdef DMSIQS
+  j->checkpoint_time = ctx->params.max_large_primes == 3
+                     ? j->last_checkpoint : sj_clock_us(j, 1);
+  j->checkpoint_clock = SJ_CHECKPOINT_MONOTONIC;
+  if (ctx->distributed != NULL) ds_host_checkpoint(ctx);
+#endif
 }
+
+#ifdef DMSIQS
+/* Report the age of a committed batch, independently of the flush timer. */
+static int sj_checkpoint_age(siqs_journal_t *j, uint64_t *age_us) {
+  uint64_t now;
+  if (j == NULL || j->checkpoint_clock == SJ_CHECKPOINT_NONE) return 0;
+  now = sj_clock_us(j, j->checkpoint_clock == SJ_CHECKPOINT_MONOTONIC);
+  *age_us = now >= j->checkpoint_time ? now - j->checkpoint_time : 0;
+  return 1;
+}
+
+static void sj_write_collection(siqs_ctx_t *ctx, uint64_t startup_us,
+                                uint64_t collection_us, uint64_t waiting_us,
+                                uint64_t drain_us) {
+  siqs_journal_t *j = ctx->journal;
+  sj_buffer b = {NULL, 0, 0};
+  if (j == NULL) return;
+  sj_flush(ctx);
+  sj_u64(&b, startup_us);
+  sj_u64(&b, collection_us);
+  sj_u64(&b, waiting_us);
+  sj_u64(&b, drain_us);
+  sj_write(j, SJ_COLLECTION, 1, &b);
+  free(b.data);
+}
+#endif
 /* TLP rows arrive in FB/LP batches. Checkpoint between publications using
  * a 4 MiB byte budget and a 20-second time target for sparse output.
  * Ordinary collection keeps its original byte and event limits. */
@@ -539,6 +754,9 @@ static int sj_batch_due(siqs_ctx_t *ctx) {
 }
 static void sj_maybe_flush(siqs_ctx_t *ctx) {
   siqs_journal_t *j = ctx->journal;
+#ifdef DMSIQS
+  if (j->defer_flush) return;
+#endif
   if (ctx->tlp != NULL && ctx->tlp->flushing) return;
   if (!j->replaying && sj_batch_due(ctx))
     sj_flush(ctx);
@@ -762,6 +980,45 @@ static void sj_replay_batch(siqs_ctx_t *ctx, siqs_poly_t *poly, uint64_t *famili
   ctx->la_rng.state = la; ctx->cofactor_rng.state = cof;
   ctx->poly_rng.state = poly_rng; sj_consume(j);
 }
+static void sj_write_solve(siqs_journal_t *j, const siqs_solve_report_t *report) {
+  sj_buffer b = {NULL, 0, 0};
+  sj_u64(&b, report->rows);
+  sj_u64(&b, report->columns);
+  sj_u64(&b, report->nonzeros);
+  sj_u64(&b, report->matrix_us);
+  sj_u64(&b, report->solver_us);
+  sj_u64(&b, report->dependency_us);
+  sj_u64(&b, report->iterations);
+  sj_u32(&b, report->method);
+  sj_u32(&b, report->threads);
+  sj_u32(&b, report->attempts);
+  sj_u32(&b, report->dependencies_returned);
+  sj_u32(&b, report->dependencies_tested);
+  sj_u32(&b, report->factor_found);
+  sj_write(j, SJ_SOLVE, 1, &b);
+  free(b.data);
+}
+
+static void sj_read_solve(siqs_journal_t *j) {
+  sj_reader r = sj_frame_reader(j);
+  uint32_t method, threads, attempts, returned, tested, found;
+  if (j->frame_count != 1 || r.left != SJ_SOLVE_BYTES)
+    sj_error(j, "invalid solve summary size or count");
+  r.data += 7U * 8U;
+  r.left -= 7U * 8U;
+  method = sj_get32(&r);
+  threads = sj_get32(&r);
+  attempts = sj_get32(&r);
+  returned = sj_get32(&r);
+  tested = sj_get32(&r);
+  found = sj_get32(&r);
+  if (method < SIQS_SOLVE_DENSE || method > SIQS_SOLVE_LANCZOS_WIDE ||
+      threads == 0 || (method == SIQS_SOLVE_DENSE ? attempts != 0 : attempts == 0) ||
+      returned > 64 || tested > returned || found > 1)
+    sj_error(j, "invalid solve summary fields");
+  sj_consume(j);
+}
+
 /* Return 1 only for a previously completed attempt; otherwise EOF has been
  * reached and the caller can continue collection and append new frames. */
 static int sj_attach(siqs_ctx_t *ctx, siqs_poly_t *poly, uint64_t *families,
@@ -794,7 +1051,12 @@ static int sj_attach(siqs_ctx_t *ctx, siqs_poly_t *poly, uint64_t *families,
   relations_before = ctx->accepted_smooth + ctx->accepted_one_lp + ctx->accepted_two_lp + ctx->accepted_three_lp;
   while (sj_peek(j)) {
     if (j->frame_type == SJ_BATCH) sj_replay_batch(ctx, poly, families, polynomials);
-    else if (j->frame_type == SJ_ATTEMPT_END) { sj_apply_end(ctx); ended = 1; break; }
+    else if (j->frame_type == SJ_SOLVE) sj_read_solve(j);
+    else if (j->frame_type == SJ_COLLECTION) {
+      if (j->frame_count != 1 || j->frame_size != SJ_COLLECTION_BYTES)
+        sj_error(j, "invalid collection summary size or count");
+      sj_consume(j);
+    } else if (j->frame_type == SJ_ATTEMPT_END) { sj_apply_end(ctx); ended = 1; break; }
     else sj_error(j, "unexpected frame inside collection attempt");
   }
   j->replaying = 0;

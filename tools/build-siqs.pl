@@ -48,6 +48,10 @@ unless ($serial) {
 print "Building $output ", ($threaded ? 'with pthreads' : 'serial-only'), "\n";
 $| = 1;
 my @command = (@compiler, @flags);
+if (grep { /\A-DDMSIQS(?:=|\z)/ } @flags) {
+  my $info = dmsiqs_git_info();
+  push @command, '-DDMSIQS_GIT_INFO="' . $info . '"' if defined $info;
+}
 push @command, $threaded ? @thread_flags : '-UPSIQS';
 push @command, '-DSIQS_HAVE_RF_ATOMICS=1' if $threaded && $atomics;
 push @command, @link_flags, '-o', $output, @ARGV, @libraries;
@@ -59,6 +63,36 @@ die "SIQS build terminated by signal " . ($status & 127) . "\n"
   if $status & 127;
 # A real build failure must not silently fall back to the other mode.
 exit($status >> 8);
+
+sub dmsiqs_git_info {
+  my $root = File::Spec->catdir($Bin, File::Spec->updir());
+  my $manifest = File::Spec->catfile($root, 'DMSIQS_BUILD');
+  my $from_manifest = -f $manifest;
+  my $metadata;
+  if ($from_manifest) {
+    open $metadata, '<', $manifest or return;
+  } elsif (-e File::Spec->catfile($root, '.git')) {
+    my $pid = open $metadata, '-|';
+    return unless defined $pid;
+    if ($pid == 0) {
+      open STDERR, '>', File::Spec->devnull();
+      exec 'git', '-C', $root, 'log', '-1', '--format=%H %cs' or exit 127;
+    }
+  } else {
+    return;
+  }
+  local $/;
+  my $line = <$metadata>;
+  close $metadata or return;
+  return unless defined $line &&
+      $line =~ /\A([0-9a-fA-F]+) ([0-9]{4})-([0-9]{2})-([0-9]{2})(?:\r?\n)?\z/;
+  my ($commit, $year, $month, $day) = ($1, $2, $3, $4);
+  my $digits = length $commit;
+  return unless $from_manifest ? $digits == 8 : ($digits == 40 || $digits == 64);
+  return unless $month >= 1 && $month <= 12 && $day >= 1 && $day <= 31;
+  my @months = qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);
+  return sprintf 'git %s %d %s %s', lc(substr($commit, 0, 8)), $day, $months[$month - 1], $year;
+}
 
 # Display a copyable shell command; execution still uses the argument list.
 sub shell_quote {

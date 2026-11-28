@@ -86,7 +86,11 @@ def main():
     output = (RESULTS / 'tlp-resumed.log').read_text()
     assert f'{N}: {P} {Q}' in output
     assert '3-LP' in output and '3lp_' in output
-    assert '# siqs combined matrix:' in output and ', 0 LP rows' in output
+    assert any(', pending ' in line for line in output.splitlines() if line.startswith('# siqs relations '))
+    assert '# siqs 3LP batches:' in output
+    assert '# siqs matrix:' in output and ', 0 LP rows' in output
+    assert f'# siqs resuming journal {path}' in output
+    assert any(line.startswith('# siqs solve: ') for line in output.splitlines())
     print('PASS resumed TLP factors the input through an LP-free matrix', flush=True)
 
     inspected = subprocess.run([sys.executable, str(TOOL), '--json', '--verify-relations',

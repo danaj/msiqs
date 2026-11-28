@@ -35,9 +35,15 @@ With a pthread build, request eight workers and periodic progress reports:
 
 The Makefile detects pthread support automatically.  The default is one
 factoring thread, and very small inputs may stay serial even when more
-are requested.  `-v` prints setup and final summaries, `-vv` adds progress.
-`-vvv` also reports interval deltas for useful full relations and accepted
-0LP, 1LP, 2LP and 3LP records.
+are requested.  `-v` shows the policy range, sieve parameters, collection
+and solve timings, and the outcome of each solve. Collection summaries give
+accepted originals per second for the round.
+`-vv` adds roughly minute-by-minute progress
+during collection and long Lanczos runs.  Collection progress distinguishes
+LP-free relations ready for the matrix from all accepted originals.
+Use `-vvv` for the policy name, the work-based collection trace, and
+detailed tuning, LP, and solver diagnostics. Use `-vvvv` to trace
+matrix readiness checks during collection.
 With no integers on the command line, `msiqs` reads whitespace or newline
 separated inputs from stdin.
 See [build and API notes](docs/IMPLEMENTATION.md#build-and-api-notes) for
@@ -64,9 +70,18 @@ For large inputs, `--2lp` can reduce peak memory.  Factoring may take longer.
 the factor-base matrix.  Pthread builds enable residual-first screening by
 default and recover exact factor vectors only for accepted records.
 The batch cutoff trades some relation yield for memory.
+Use `-vv` for collection progress and `-vvv` for diagnostic counts, including
+the pending queue and batch statistics when collecting 3LP locally.
 `make check-3lp` runs the component checks. `make check-3lp-integration` also
 factors a 270-bit semiprime, interrupts and resumes a journal,
 and verifies every saved relation and completed replay.
+
+### Distributed collection
+
+Build the distributed program with `make dmsiqs`. The [dmsiqs guide](DMSIQS.md)
+covers workers, coordinator discovery, SSH forwarding, and the Axion tools.
+
+### Local journals
 
 To save relation collection and resume it later, use an optional journal:
 
@@ -124,15 +139,7 @@ November 2026 timing results:
 
 With 96 threads on an Intel Xeon 8581C, RSA-100 took 31.0 s and RSA-130 took 4h 13m (379 core-hours).
 
-Preliminary distributed results using 6 n4a-highcpu-64 instances (6 x 64 cores), with host coordination and linear algebra on a MacBook M1 Pro (8 threads):
-- RSA-100  16.4s, 1.0 core-hours
-- RSA-110  1m 41.6s, 7.9 core-hours
-- RSA-120  10m 57.4s, 51.6 core-hours
-- RSA-130  86m 58.3s, 490.3 core-hours  [9m23s Lanczos with 8 threads]
-
-Core hours here include the host and all workers.
-The AMD EPYC Turin cores in the single-machine runs above do more
-SIQS work per core-hour than the Axion cores used here.
+See the [distributed timings](DMSIQS.md#preliminary-timings) for six Axion workers.
 
 More comparisons can be seen in the [benchmarks document](docs/BENCHMARKS.md)
 

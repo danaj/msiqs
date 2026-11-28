@@ -164,28 +164,33 @@ static void psiqs_prepare_publication(psiqs_worker_t *worker, uint32_t limit) {
   worker->polynomials = 0;
 }
 
-/* Select distinct A values serially, then let each worker initialize roots. */
-static int psiqs_assign_family(siqs_ctx_t *master, siqs_poly_t *dispatch,
-                               psiqs_worker_t *worker, uint32_t limit) {
+/* Install a family selected by the owner of the A history. */
+static void psiqs_install_family(psiqs_worker_t *worker, const uint32_t *indices,
+                                 const mpz_t a, const mpz_t da, uint32_t limit) {
   siqs_ctx_t *ctx = &worker->ctx;
   siqs_poly_t *poly = &worker->poly;
   uint32_t i;
+  for (i = 0; i < poly->q_count; i++)
+    if (poly->a_index[i] < ctx->params.fb_size)
+      ctx->fb_in_a[poly->a_index[i]] = 0;
+  memcpy(poly->a_index, indices,
+         (size_t)poly->q_count * sizeof(*poly->a_index));
+  for (i = 0; i < poly->q_count; i++)
+    ctx->fb_in_a[poly->a_index[i]] = 1;
+  mpz_set(poly->A, a);
+  mpz_set(poly->DA, da);
+  worker->family_polynomials = 0;
+  worker->family_assigned = 1;
+  psiqs_prepare_publication(worker, limit);
+}
+
+static int psiqs_assign_family(siqs_ctx_t *master, siqs_poly_t *dispatch,
+                               psiqs_worker_t *worker, uint32_t limit) {
   if (!siqs_choose_A(master, dispatch))
     return 0;
   if (master->journal != NULL)
     siqs_journal_family(master, dispatch);
-  for (i = 0; i < poly->q_count; i++)
-    if (poly->a_index[i] < ctx->params.fb_size)
-      ctx->fb_in_a[poly->a_index[i]] = 0;
-  memcpy(poly->a_index, dispatch->a_index,
-         (size_t)poly->q_count * sizeof(*poly->a_index));
-  for (i = 0; i < poly->q_count; i++)
-    ctx->fb_in_a[poly->a_index[i]] = 1;
-  mpz_set(poly->A, dispatch->A);
-  mpz_set(poly->DA, dispatch->DA);
-  worker->family_polynomials = 0;
-  worker->family_assigned = 1;
-  psiqs_prepare_publication(worker, limit);
+  psiqs_install_family(worker, dispatch->a_index, dispatch->A, dispatch->DA, limit);
   return 1;
 }
 
@@ -616,9 +621,8 @@ static int psiqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *dispatch,
   psiqs_pool_t *pool;
   uint32_t i, check_interval = ctx->params.fb_size / 128;
   uint64_t max_polynomials = siqs_polynomial_limit(&ctx->params);
-  uint64_t report_step, next_report;
-  uint32_t last_report_count = UINT32_MAX, active = 0;
-  uint64_t last_report_polys = UINT64_MAX, remaining;
+  uint64_t report_step, remaining;
+  uint32_t active = 0;
   int verbose = ctx->verbose, complete = 0, exhausted = 0, ready = 0;
   if (check_interval < SIQS_MATRIX_CHECK_MIN)
     check_interval = SIQS_MATRIX_CHECK_MIN;
@@ -642,7 +646,6 @@ static int psiqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *dispatch,
   /* Use successfully created workers, not requested slots.  High core counts
    * otherwise make the shared collection-work clock excessively chatty. */
   report_step = siqs_progress_poly_step(ctx, pool->live);
-  next_report = *poly_count + report_step;
   remaining = max_polynomials - *poly_count;
   for (i = 0; i < pool->count && remaining != 0; i++) {
     if (pool->workers[i].started) {
@@ -688,20 +691,16 @@ static int psiqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *dispatch,
       uint32_t rows, columns;
       ready = siqs_matrix_ready(ctx, &rows, &columns);
       *next_matrix_check = siqs_relation_count(ctx) + check_interval;
-      if (!ready && verbose > 2) {
-        siqs_print_matrix_progress(ctx, rows, columns, ready);
-      }
+      if (!ready)
+        siqs_print_matrix_readiness(ctx, rows, columns, ready);
       if (ready) {
         complete = 1;
         break;
       }
     }
-    if (verbose > 1 && *poly_count >= next_report) {
+    if (siqs_progress_due(ctx, *poly_count, report_step, SIQS_PROGRESS_SECONDS)) {
       siqs_print_polynomial_notice(ctx, *poly_count);
       siqs_print_relation_report(ctx, target, *poly_count);
-      last_report_count = siqs_relation_count(ctx);
-      last_report_polys = *poly_count;
-      next_report = *poly_count + report_step;
     }
     if (ctx->factor_found || (ctx->use_bids ? ctx->bids_stop :
       siqs_relation_target_reached(ctx, target))) {
@@ -754,17 +753,11 @@ static int psiqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *dispatch,
   if (ctx->factor_found || (ctx->use_bids ? ctx->bids_stop :
       siqs_relation_target_reached(ctx, target)))
     complete = 1;
-  if (ready && verbose > 1) {
+  if (ready && verbose > 3) {
     uint32_t rows, columns;
     (void)siqs_matrix_ready(ctx, &rows, &columns);
-    siqs_print_relation_report(ctx, target, *poly_count);
-    last_report_count = siqs_relation_count(ctx);
-    last_report_polys = *poly_count;
-    siqs_print_matrix_progress(ctx, rows, columns, 1);
+    siqs_print_matrix_readiness(ctx, rows, columns, 1);
   }
-  if (verbose > 1 &&
-      (last_report_count != siqs_relation_count(ctx) || last_report_polys != *poly_count))
-    siqs_print_relation_report(ctx, target, *poly_count);
   psiqs_pool_destroy(pool);
   return complete;
 }

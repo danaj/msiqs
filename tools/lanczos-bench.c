@@ -216,7 +216,7 @@ static uint64_t *bench_solve(uint32_t rows, uint32_t count, la_col_t *cols,
   if (matrix.pool != NULL) run->effective = matrix.pool->nthreads;
   for (attempt = 0; attempt < NLA_MAX_ATTEMPTS; attempt++) {
     run->attempts++;
-    result = nla_block_lanczos_once(&matrix, &rng_state, mask, bench_verbose ? 3 : 0);
+    result = nla_block_lanczos_once(&matrix, &rng_state, mask, bench_verbose ? 3 : 0, NULL);
     if (result != NULL && *mask != 0) break;
     free(result);
     result = NULL;

@@ -142,7 +142,7 @@ header and then its payload:
 | Offset | Type | Meaning |
 | ---: | --- | --- |
 | 0 | u32 | magic `0x4b4c424a` (bytes `JBLK`) |
-| 4 | u32 | frame type, 1 through 6 |
+| 4 | u32 | frame type, 1 through 9 |
 | 8 | u64 | sequence number, starting at zero |
 | 16 | u32 | payload byte length, at most 64 MiB |
 | 20 | u32 | item/event count |
@@ -442,7 +442,69 @@ JOB\_END, including when the status reports incomplete factoring. Without
 that record it keeps waiting. Complete frames after JOB\_END are
 rejected.  The record does not announce the earlier instant when sieving stops.
 
+### 7: SOLVE
+
+A distributed host writes a summary after each solver call and its dependency
+tests, including calls that yield no split. The item count is one and the
+payload is 80 bytes. In order it contains seven `u64` fields and six `u32`
+fields.
+
+| Type | Fields in order |
+| --- | --- |
+| `u64` | Reduced active rows, columns, nonzeros, matrix preparation µs, solver µs, dependency testing µs, Lanczos iterations |
+| `u32` | Method (1 dense, 2 Lanczos, 3 Lanczos with all rows), actual threads, Lanczos attempts, dependencies returned, dependencies tested, factor found (0 or 1) |
+
+Times are wall-clock durations. The first solver call after a matrix build
+includes its preparation time. The iteration count includes internal
+retries. Attempts and iterations are zero for dense elimination. A test
+counts once it reaches the factor GCD.
+
+The inspector displays each record and includes it in the JSON `solves` list.
+The record is diagnostic and replay uses the usual relation and factor
+records. This optional version 2 frame is written by `dmsiqs`. Readers built
+before its addition need an update to open journals containing it.
+
+### 8: COLLECTION
+
+A distributed host writes one summary when it ends a collection round,
+after flushing pending relation records. The item count is one. The 32-byte
+payload contains four `u64` wall-clock durations in microseconds, in order:
+startup to the first usable worker, collection with usable workers, waiting
+for capacity after startup, and drain before solving or returning.
+Startup includes any initial wait for a worker. The four durations are
+disjoint.
+
+The inspector displays the timings and includes them in the JSON
+`collections` list. Replay validates the frame and continues from the
+relation and factor records. This optional version 2 frame requires an
+updated reader.
+
+### 9: ACCOUNTING
+
+A distributed host writes CPU and host peak RSS snapshots after collection
+batches and on invocation exit. The item count is one and the 68-byte
+payload contains these fields in order:
+
+| Type | Fields in order |
+| --- | --- |
+| `u64` | Worker user CPU µs, worker system CPU µs, host user CPU µs, host system CPU µs, host peak RSS bytes, worker jobs, jobs with final CPU, jobs with checkpoint-only CPU |
+| `u32` | Flags, value 1 for available host CPU and value 2 for the final invocation snapshot |
+
+Each snapshot is cumulative within its writing run. The reader uses the
+latest snapshot per run, sums CPU times and job counts across runs, and
+takes the maximum recorded host RSS. Zero RSS indicates an unavailable
+measurement. Missing snapshots or final reports are reflected in the
+coverage counts. Statistics from an interrupted run extend through its last
+saved snapshot. The inspector includes the summary in JSON as `accounting`.
+This optional version 2 frame requires an updated reader.
+
 ## Interrupted writes and durability
+
+On macOS and Linux, active journal writers check the free space on the
+journal's filesystem about once a minute. They warn on stderr when recent
+journal growth projects less than 30 minutes of space, using up to the last
+five minutes of writes. They also warn when space falls below a checkpoint
+allowance. Warnings repeat at most every five minutes while space stays low.
 
 A short final frame header or payload is ignored.  Its valid predecessor is
 the end of the replayable prefix.  Before appending, the writer truncates the

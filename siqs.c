@@ -46,6 +46,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <gmp.h>
 
@@ -56,9 +57,43 @@
 #include "pr32_iter.h"
 #include "tinyecm64.h"
 
+#ifdef DMSIQS
+# include "dmsiqs.h"
+# include "dmsiqs_wire.h"
+#endif
+
 static int siqs_is_prob_prime(const mpz_t n) {
   /* BPSW on GMP >= 6.2.  15 Miller-Rabin rounds on older versions. */
   return mpz_probab_prime_p(n, 15);
+}
+
+static double siqs_log_now(void) {
+#if defined(CLOCK_MONOTONIC) || defined(TIME_UTC)
+  struct timespec ts;
+# ifdef CLOCK_MONOTONIC
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+# endif
+# ifdef TIME_UTC
+  if (timespec_get(&ts, TIME_UTC) == TIME_UTC)
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+# endif
+#endif
+  return (double)time(NULL);
+}
+
+static void siqs_log_duration(char *buf, size_t size, double seconds) {
+  uint64_t tenths = seconds > 0 ? (uint64_t)(seconds * 10.0 + 0.5) : 0;
+  if (tenths >= 36000)
+    snprintf(buf, size, "%lluh %02llum %02llus",
+             (unsigned long long)(tenths / 36000),
+             (unsigned long long)(tenths / 600 % 60),
+             (unsigned long long)(tenths / 10 % 60));
+  else if (tenths >= 600)
+    snprintf(buf, size, "%llum %04.1fs",
+             (unsigned long long)(tenths / 600), (double)(tenths % 600) / 10.0);
+  else
+    snprintf(buf, size, "%.3fs", seconds > 0 ? seconds : 0.0);
 }
 
 #ifndef UINT8_MAX
@@ -121,7 +156,6 @@ static int siqs_is_prob_prime(const mpz_t n) {
  * Totals are per factor call; workers accumulate privately and merge only
  * through their normal result handoff.  No shared counters or atomics. */
 #ifdef SIQS_TIMING
-# include <time.h>
 # ifndef SIQS_TIMING_MIN_BITS
 #  define SIQS_TIMING_MIN_BITS 270U
 # endif
@@ -198,8 +232,10 @@ typedef struct {
 #define SIQS_MATRIX_EXTRA_RELS_2LP_DEFAULT 64U
 #define SIQS_MATRIX_CHECK_MIN     32U
 #define SIQS_MATRIX_CHECK_MAX    512U
-/* Timer-free verbose-output calibration.  The first value is deliberately a
- * reference-machine estimate; the second is the human-facing cadence knob. */
+/* Retain a work-based trace at diagnostic verbosity. */
+#ifndef SIQS_PROGRESS_SECONDS
+# define SIQS_PROGRESS_SECONDS 60U
+#endif
 #ifndef SIQS_PROGRESS_WORK_PER_SEC
 # define SIQS_PROGRESS_WORK_PER_SEC UINT64_C(600000000)
 #endif
@@ -1071,6 +1107,9 @@ typedef struct {
   uint32_t count;
   uint32_t alloc;
   siqs_journal_t *journal;
+#ifdef DMSIQS
+  ds_host *distributed;
+#endif
 #ifdef SIQS_TIMING
   uint64_t cofactor_time;   /* Splitter/validation microseconds, summed over workers. */
   uint64_t cofactor_calls;  /* Split attempts, excluding early cofactor checks. */
@@ -1236,14 +1275,15 @@ typedef struct {
 } siqs_bids_word_t;
 
 typedef struct {
-  uint64_t full, smooth, one_lp, two_lp, three_lp, polynomials, pending;
+  uint64_t full, smooth, one_lp, two_lp, three_lp, polynomials;
+  double at;
 } siqs_progress_snapshot_t;
 
 #ifdef PSIQS
 struct siqs_tlp_gcd_job;
 #endif
 
-typedef struct {
+typedef struct siqs_ctx_t {
   mpz_srcptr original_n;
   mpz_t n;
   mpz_t kn;
@@ -1288,6 +1328,7 @@ typedef struct {
   uint32_t full_alloc;
   uint32_t matrix_next_target;
   uint32_t matrix_last_count;
+  int matrix_readiness_announced;
   uint32_t matrix_retry_batch;
   uint32_t matrix_target_limit;
   uint32_t *matrix_ready_incidence;
@@ -1325,6 +1366,8 @@ typedef struct {
   uint64_t accepted_two_lp;
   uint64_t accepted_three_lp;
   siqs_progress_snapshot_t progress_last;
+  double collection_started;
+  uint64_t collection_start_originals;
   uint64_t tlp_candidates, tlp_batches, tlp_gcd_one, tlp_gcd_proper, tlp_gcd_whole;
   uint64_t tlp_completed, tlp_rejected;
   /* These diagnostics count newly processed work, excluding journal replay. */
@@ -1356,7 +1399,21 @@ typedef struct {
   siqs_journal_t *journal;
   uint64_t *journal_poly_count;
   uint64_t journal_cycles[8];
+#ifdef DMSIQS
+  ds_host *distributed;
+  int distributed_worker;
+  int (*distributed_emit)(struct siqs_ctx_t *, const siqs_raw_relation_t *);
+  void *distributed_data;
+  int distributed_failed;
+#endif
 } siqs_ctx_t;
+
+#ifdef DMSIQS
+static int ds_collect_relations(siqs_ctx_t *, siqs_poly_t *, uint32_t,
+                                uint32_t *, uint64_t *, uint64_t *);
+static void ds_host_end_attempt(ds_host *);
+static void ds_host_checkpoint(siqs_ctx_t *);
+#endif
 
 static void siqs_tlp_flush(siqs_ctx_t *);
 static void siqs_archive_lp_relation(siqs_ctx_t *, siqs_raw_relation_t *);
@@ -1377,6 +1434,16 @@ static void siqs_journal_family(siqs_ctx_t *, const siqs_poly_t *);
 static void sj_flush(siqs_ctx_t *);
 static void sj_maybe_flush(siqs_ctx_t *);
 static void siqs_journal_full(siqs_ctx_t *, uint32_t);
+
+enum { SIQS_SOLVE_DENSE = 1, SIQS_SOLVE_LANCZOS, SIQS_SOLVE_LANCZOS_WIDE };
+typedef struct {
+  uint64_t rows, columns, nonzeros;
+  uint64_t matrix_us, solver_us, dependency_us, iterations;
+  uint32_t method, threads, attempts, dependencies_returned, dependencies_tested, factor_found;
+} siqs_solve_report_t;
+
+static uint64_t sj_clock_us(siqs_journal_t *, int);
+static void sj_write_solve(siqs_journal_t *, const siqs_solve_report_t *);
 
 static int siqs_bids_enabled(const siqs_ctx_t *ctx) {
   return ctx->params.max_large_primes != 3 &&
@@ -1708,6 +1775,9 @@ static uint32_t siqs_sqrtmod_u32(uint32_t n, uint32_t p) {
 
 static void siqs_factor_array_init(siqs_factor_array_t *fa, const mpz_t n) {
   fa->journal = NULL;
+#ifdef DMSIQS
+  fa->distributed = NULL;
+#endif
   fa->alloc = 16;
   fa->count = 1;
 #ifdef SIQS_TIMING
@@ -2597,11 +2667,13 @@ static uint64_t siqs_relation_fingerprint(const siqs_raw_relation_t *r) {
   return h;
 }
 
-#ifdef SIQS_DEBUG
-static void siqs_verify_raw_relation(const siqs_ctx_t *ctx,
-                                     const siqs_raw_relation_t *r) {
+#if defined(SIQS_DEBUG) || defined(DMSIQS)
+static int siqs_raw_relation_congruent(const siqs_ctx_t *ctx,
+                                       const siqs_raw_relation_t *r) {
   uint32_t i;
+  int valid;
   mpz_t lhs, rhs, t;
+  if (r->lp3 == 0) return 0;
   mpz_init(lhs);
   mpz_init_set_ui(rhs, 1);
   mpz_init(t);
@@ -2631,17 +2703,24 @@ static void siqs_verify_raw_relation(const siqs_ctx_t *ctx,
     mpz_mod(rhs, rhs, ctx->n);
   }
   if (r->lp3 != 1) {
-    if (r->lp3 == 0) croak("SIQS: unresolved 3LP record reached relation verification");
     siqs_mpz_set_u64(t, r->lp3);
     mpz_mul(rhs, rhs, t);
     mpz_mod(rhs, rhs, ctx->n);
   }
   mpz_mod(rhs, rhs, ctx->n);
-  if (mpz_cmp(lhs, rhs) != 0)
-    croak("SIQS: raw relation invariant failed");
+  valid = mpz_cmp(lhs, rhs) == 0;
   mpz_clear(lhs);
   mpz_clear(rhs);
   mpz_clear(t);
+  return valid;
+}
+#endif
+
+#ifdef SIQS_DEBUG
+static void siqs_verify_raw_relation(const siqs_ctx_t *ctx,
+                                     const siqs_raw_relation_t *r) {
+  if (!siqs_raw_relation_congruent(ctx, r))
+    croak("SIQS: raw relation invariant failed");
 }
 #endif
 
@@ -3228,6 +3307,14 @@ static uint32_t siqs_partial_count(const siqs_ctx_t *ctx) {
 
 static void siqs_accept_raw_relation(siqs_ctx_t *ctx,
                                      siqs_raw_relation_t *r) {
+#ifdef DMSIQS
+  if (ctx->distributed_emit != NULL) {
+    if (!ctx->distributed_failed && !ctx->distributed_emit(ctx, r))
+      ctx->distributed_failed = 1;
+    siqs_raw_relation_free(ctx, r);
+    return;
+  }
+#endif
 #ifdef SIQS_TIMING
   uint64_t timing_start = ctx->params.bits >= SIQS_TIMING_MIN_BITS ? siqs_timing_now() : 0;
 #endif
@@ -5198,10 +5285,6 @@ static int siqs_try_inline_matrix(siqs_ctx_t *ctx) {
       siqs_relation_count(ctx) <= ctx->matrix_last_count)
     return ctx->factor_found;
   ctx->matrix_last_count = siqs_relation_count(ctx);
-  if (ctx->verbose > 0) {
-    printf("# siqs linear algebra with %u relations\n", siqs_relation_count(ctx));
-    fflush(stdout);
-  }
   if (siqs_solve(ctx))
     return 1;
   if (siqs_relation_count(ctx) >
@@ -5210,6 +5293,8 @@ static int siqs_try_inline_matrix(siqs_ctx_t *ctx) {
     return 1;
   }
   ctx->matrix_next_target = siqs_relation_count(ctx) + ctx->matrix_retry_batch;
+  if (ctx->verbose > 0)
+    printf("# siqs collecting more relations for a retry (target %u)\n", ctx->matrix_next_target);
   return 0;
 }
 
@@ -5473,20 +5558,31 @@ static int siqs_matrix_core(siqs_ctx_t *ctx,
 }
 
 static int siqs_matrix_ready(siqs_ctx_t *ctx, uint32_t *rows, uint32_t *cols) {
+  if (ctx->verbose > 2 && !ctx->matrix_readiness_announced) {
+    puts("# siqs starting matrix readiness checks");
+    fflush(stdout);
+    ctx->matrix_readiness_announced = 1;
+  }
   /* Completed LP combinations already certify readiness. Leave an incomplete
    * GCD batch buffered until the normal stop or solver drain. */
   if (ctx->lp_combiner == NULL) siqs_tlp_flush(ctx);
   return siqs_matrix_core(ctx, rows, cols);
 }
 
-static void siqs_print_matrix_progress(const siqs_ctx_t *ctx,
+static void siqs_print_matrix_readiness(const siqs_ctx_t *ctx,
                                         uint32_t rows, uint32_t cols, int ready) {
+  if (ctx->verbose <= 3) return;
+  unsigned extra = SIQS_MATRIX_EXTRA_RELS(ctx);
+  unsigned long long needed = (unsigned long long)rows + extra;
+  const char *status = ready ? "ready" : "collecting";
   if (ctx->lp_combiner != NULL)
-    printf("# siqs LP combinations %u, FB/sign row bound %u%s\n",
-           cols, rows, ready ? ", ready" : "");
+    printf("# siqs matrix readiness: %u LP-free columns, need %llu "
+           "(up to %u FB/sign rows plus %u extra columns), %s\n",
+           cols, needed, rows, extra, status);
   else
-    printf("# siqs matrix core %u columns, %u rows%s\n",
-           cols, rows, ready ? ", ready" : "");
+    printf("# siqs matrix readiness: %u core columns, need %llu "
+           "(%u core rows plus %u extra columns), %s\n",
+           cols, needed, rows, extra, status);
   fflush(stdout);
 }
 
@@ -5497,8 +5593,9 @@ static int siqs_test_dependencies_classified(siqs_ctx_t *ctx,
                                   unsigned long ncols,
                                   const uint64_t *nullrows, uint64_t mask,
                                   int *all_tested,
-                                  siqs_dependency_result_t *classification) {
-  uint32_t dependency, ndeps = 0;
+                                  siqs_dependency_result_t *classification,
+                                  uint32_t *tested) {
+  uint32_t dependency;
   uint64_t *expanded = NULL;
   const uint64_t *dependency_rows = nullrows;
   unsigned long dependency_cols = ncols;
@@ -5506,13 +5603,6 @@ static int siqs_test_dependencies_classified(siqs_ctx_t *ctx,
 #ifdef SIQS_TIMING
   uint64_t timing_start = ctx->params.bits >= SIQS_TIMING_MIN_BITS ? siqs_timing_now() : 0;
 #endif
-  if (ctx->verbose > 1 && !ctx->use_bids) {
-    for (dependency = 0; dependency < 64; dependency++)
-      if (mask & (UINT64_C(1) << dependency))
-        ndeps++;
-    printf("# siqs solver returned %u dependenc%s\n",
-           ndeps, ndeps==1 ? "y" : "ies");
-  }
   if (ctx->lp_combiner != NULL) {
     siqs_lp_prepare_dependency(ctx);
     expanded = siqs_lp_combiner_expand(ctx->lp_combiner, columns, ncols, nullrows);
@@ -5599,6 +5689,7 @@ static int siqs_test_dependencies_classified(siqs_ctx_t *ctx,
     }
     mpz_mod(rhs, rhs, ctx->n);
 
+    if (tested != NULL) ++*tested;
     mpz_sub(delta, lhs, rhs);
     mpz_gcd(divisor, delta, ctx->n);
     if (mpz_cmp_ui(divisor, 1) <= 0 || mpz_cmp(divisor, ctx->n) == 0) {
@@ -5642,7 +5733,7 @@ static int siqs_test_dependencies_checked(siqs_ctx_t *ctx,
                          const la_col_t *columns, unsigned long ncols,
                          const uint64_t *nullrows, uint64_t mask, int *all_tested) {
   return siqs_test_dependencies_classified(ctx, columns, ncols, nullrows,
-                                          mask, all_tested, NULL);
+                                          mask, all_tested, NULL, NULL);
 }
 
 /* Preserve the ordinary dependency tester for callers that do not need
@@ -5838,7 +5929,7 @@ static void siqs_bids_dependency(siqs_ctx_t *ctx, uint32_t id,
   }
 #endif
   siqs_test_dependencies_classified(ctx, columns, count, nullrows, 1,
-                                    &all_tested, &classification);
+                                    &all_tested, &classification, NULL);
   if (!all_tested) classification = SIQS_DEPENDENCY_UNKNOWN;
   s->dependencies++;
   s->trivial += classification == SIQS_DEPENDENCY_TRIVIAL;
@@ -5963,6 +6054,72 @@ static void siqs_lp_matrix_stats(unsigned long nrows, unsigned long ncols,
   free(used);
 }
 
+static uint64_t siqs_solve_clock(siqs_ctx_t *ctx, int journal_solve) {
+  return journal_solve ? sj_clock_us(ctx->journal, 1) :
+                         (uint64_t)(siqs_log_now() * 1e6);
+}
+
+static uint64_t siqs_solve_elapsed(siqs_ctx_t *ctx, int journal_solve, uint64_t started) {
+  uint64_t now = siqs_solve_clock(ctx, journal_solve);
+  return now >= started ? now - started : 0;
+}
+
+static void siqs_test_and_log_solve(siqs_ctx_t *ctx, siqs_solve_report_t *report, int journal_solve,
+                            const la_col_t *columns, unsigned long ncols,
+                            const uint64_t *nullrows, uint64_t mask, int *all_tested) {
+  uint64_t bits;
+  report->dependency_us = 0;
+  report->dependencies_returned = report->dependencies_tested = 0;
+  if (nullrows != NULL) {
+    uint64_t started = siqs_solve_clock(ctx, journal_solve);
+    for (bits = mask; bits != 0; bits &= bits - 1)
+      ++report->dependencies_returned;
+    siqs_test_dependencies_classified(ctx, columns, ncols, nullrows, mask,
+                                      all_tested, NULL, &report->dependencies_tested);
+    report->dependency_us = siqs_solve_elapsed(ctx, journal_solve, started);
+  }
+  report->factor_found = ctx->factor_found != 0;
+  if (journal_solve) sj_write_solve(ctx->journal, report);
+  if (ctx->verbose > 0) {
+    char matrix[32], solver[32], dependencies[32];
+    const char *method = report->method == SIQS_SOLVE_DENSE ? "dense elimination" :
+                         report->method == SIQS_SOLVE_LANCZOS_WIDE ? "Lanczos (all rows)" :
+                         "Lanczos";
+    siqs_log_duration(solver, sizeof(solver), report->solver_us / 1e6);
+    siqs_log_duration(dependencies, sizeof(dependencies), report->dependency_us / 1e6);
+    printf("# siqs solve: ");
+    if (report->matrix_us > 0) {
+      siqs_log_duration(matrix, sizeof(matrix), report->matrix_us / 1e6);
+      printf("matrix %s, ", matrix);
+    }
+    printf("%s %s, dependencies %s", method, solver, dependencies);
+    /* Diagnostic verbosity already shows the iteration count for each attempt. */
+    if (ctx->verbose > 1 && report->iterations != 0 &&
+        (ctx->verbose == 2 || report->attempts > 1)) {
+      printf(", %llu iterations", (unsigned long long)report->iterations);
+      if (report->attempts > 1) printf(" across %u attempts", report->attempts);
+    }
+    if (ctx->verbose > 1)
+      printf("\n# siqs %u/%u dependencies tested", report->dependencies_tested,
+             report->dependencies_returned);
+    printf(", %s\n", report->factor_found ? "split found" : "no split");
+    fflush(stdout);
+  }
+  report->matrix_us = 0; /* Charge construction to the first solver call. */
+}
+
+#ifdef DMSIQS
+static void siqs_report_host_peak_rss(const siqs_ctx_t *ctx, const char *phase) {
+  uint64_t peak_rss_bytes;
+  if (ctx->distributed == NULL || ctx->verbose <= 2) return;
+  if (ds_process_usage(NULL, &peak_rss_bytes) && peak_rss_bytes != 0) {
+    printf("# dmsiqs host peak RSS %s: %.1f MiB (process high-water)\n",
+           phase, (double)peak_rss_bytes / (1024.0 * 1024.0));
+    fflush(stdout);
+  }
+}
+#endif
+
 /* The shared LP collector solves LP-free combinations; other paths use their FB matrix. */
 static int siqs_solve(siqs_ctx_t *ctx) {
   unsigned long original_cols, nrows, ncols, i;
@@ -5972,6 +6129,10 @@ static int siqs_solve(siqs_ctx_t *ctx) {
   la_col_t *columns;
   int combined = ctx->lp_combiner != NULL;
   int dense_selected, dense_result = 0, dense_tested = 0;
+  int journal_solve = 0;
+  int report_solve;
+  siqs_solve_report_t report = {0};
+  uint64_t started;
 #ifdef SIQS_TIMING
   uint64_t timing_start;
 #endif
@@ -5984,6 +6145,17 @@ static int siqs_solve(siqs_ctx_t *ctx) {
   /* Seal pending collection before matrix construction/solving. The final
    * relation batch's timestamp must not include the linear algebra time. */
   if (ctx->journal != NULL) sj_flush(ctx);
+  if (ctx->verbose > 0) {
+    if (ctx->verbose > 1) puts("#");
+    printf("# siqs building matrix from %u LP-free relations\n", siqs_relation_count(ctx));
+    fflush(stdout);
+  }
+#ifdef DMSIQS
+  journal_solve = ctx->distributed != NULL && ctx->journal != NULL;
+  siqs_report_host_peak_rss(ctx, "before matrix construction");
+#endif
+  report_solve = journal_solve || ctx->verbose > 0;
+  started = report_solve ? siqs_solve_clock(ctx, journal_solve) : 0;
 #ifdef SIQS_TIMING
   timing_start = ctx->params.bits >= SIQS_TIMING_MIN_BITS ? siqs_timing_now() : 0;
 #endif
@@ -5998,7 +6170,7 @@ static int siqs_solve(siqs_ctx_t *ctx) {
           ? siqs_lp_combiner_matrix(ctx, &nrows, &ncols)
           : siqs_build_matrix(ctx, &nrows, &ncols);
   original_cols = ncols;
-  if (combined && ctx->verbose > 0) {
+  if (combined && ctx->verbose > 2) {
     uint32_t rows, lp_rows;
     uint64_t entries;
     siqs_lp_combiner_t *s = ctx->lp_combiner;
@@ -6007,26 +6179,42 @@ static int siqs_solve(siqs_ctx_t *ctx) {
     printf("# siqs LP combination: %u accepted, rank %u -> %u relations; "
            "%u FB/sign rows, %llu entries, no LP rows\n",
            s->accepted, s->rank, s->cycle_count, rows, (unsigned long long)entries);
-    if (ctx->verbose > 1)
-      printf("# siqs LP basis: %llu entries, maximum intermediate LP weight %u, %u XORs, %llu replacements\n",
-             (unsigned long long)s->basis_entries, s->max_weight,
-             s->node_count - s->accepted, (unsigned long long)s->swaps);
+    printf("# siqs LP basis: %llu entries, maximum intermediate LP weight %u, %u XORs, %llu replacements\n",
+           (unsigned long long)s->basis_entries, s->max_weight,
+           s->node_count - s->accepted, (unsigned long long)s->swaps);
     fflush(stdout);
   }
-  la_reduce_matrix(&nrows, &ncols, columns, ctx->verbose);
-  if (combined && ctx->verbose > 0) {
+  la_reduce_matrix(&nrows, &ncols, columns, 0);
+  if (report_solve) {
     uint32_t rows, lp_rows;
     uint64_t entries;
     siqs_lp_matrix_stats(nrows, ncols, columns, ctx->params.fb_size + 1U,
                          &rows, &lp_rows, &entries);
-    printf("# siqs combined matrix: %u rows x %lu columns, %llu entries, %u LP rows\n",
-           rows, ncols, (unsigned long long)entries, lp_rows);
+    if (ctx->verbose > 0) {
+      printf("# siqs matrix: %u rows x %lu columns, %llu nonzeros",
+             rows, ncols, (unsigned long long)entries);
+      if (ctx->verbose > 2 || lp_rows != 0) printf(", %u LP rows", lp_rows);
+      putchar('\n');
+    }
+    report.rows = rows;
+    report.columns = ncols;
+    report.nonzeros = entries;
   }
 #ifdef SIQS_TIMING
   if (timing_start != 0)
     ctx->result->matrix_time += siqs_timing_elapsed(timing_start);
 #endif
+  if (report_solve)
+    report.matrix_us = siqs_solve_elapsed(ctx, journal_solve, started);
+#ifdef DMSIQS
+  siqs_report_host_peak_rss(ctx, "after matrix reduction");
+#endif
   if (ncols == 0) {
+    if (ctx->verbose > 0) {
+      char matrix[32];
+      siqs_log_duration(matrix, sizeof(matrix), report.matrix_us / 1e6);
+      printf("# siqs matrix %s, no columns remain after reduction\n", matrix);
+    }
     goto solve_cleanup;
   }
   dense_selected = siqs_use_dense_solver(ncols);
@@ -6034,17 +6222,26 @@ static int siqs_solve(siqs_ctx_t *ctx) {
 #ifdef SIQS_TIMING
     timing_start = ctx->params.bits >= SIQS_TIMING_MIN_BITS ? siqs_timing_now() : 0;
 #endif
+    if (ctx->verbose > 0) {
+      puts("# siqs dense elimination using 1 thread");
+      fflush(stdout);
+    }
+    if (report_solve) started = siqs_solve_clock(ctx, journal_solve);
     nullrows = la_dense_nullspace(nrows, ncols, columns, &mask);
 #ifdef SIQS_TIMING
     if (timing_start != 0)
       ctx->result->solver_time += siqs_timing_elapsed(timing_start);
 #endif
     dense_result = nullrows != NULL;
-  }
-
-  if (dense_result) {
-    siqs_test_dependencies_checked(ctx, columns, ncols, nullrows, mask,
-                                   &dense_tested);
+    if (report_solve) {
+      report.method = SIQS_SOLVE_DENSE;
+      report.threads = 1;
+      report.solver_us = siqs_solve_elapsed(ctx, journal_solve, started);
+      siqs_test_and_log_solve(ctx, &report, journal_solve, columns, ncols, nullrows, mask,
+                              &dense_tested);
+    } else if (dense_result) {
+      siqs_test_dependencies_checked(ctx, columns, ncols, nullrows, mask, &dense_tested);
+    }
     free(nullrows);
     nullrows = NULL;
   }
@@ -6063,12 +6260,24 @@ static int siqs_solve(siqs_ctx_t *ctx) {
          block_attempt++) {
       seed = siqs_rand64(&ctx->la_rng);
       if (block_attempt != 0 && ctx->verbose > 0) {
-        printf("Lanczos did not refine factors; retrying with all rows.\n");
+        printf("# siqs Lanczos did not refine factors, retrying with all rows\n");
         fflush(stdout);
       }
 #ifdef SIQS_TIMING
       timing_start = ctx->params.bits >= SIQS_TIMING_MIN_BITS ? siqs_timing_now() : 0;
 #endif
+      if (report_solve) {
+        la_lanczos_stats_t stats;
+        started = siqs_solve_clock(ctx, journal_solve);
+        nullrows = la_block_lanczos_report(nrows, 0, ncols, columns, seed, &mask,
+                                           block_attempt != 0, ctx->verbose,
+                                           ctx->nthreads, &stats);
+        report.solver_us = siqs_solve_elapsed(ctx, journal_solve, started);
+        report.method = block_attempt == 0 ? SIQS_SOLVE_LANCZOS : SIQS_SOLVE_LANCZOS_WIDE;
+        report.threads = stats.threads;
+        report.attempts = stats.attempts;
+        report.iterations = stats.iterations;
+      } else
 #ifdef PSIQS
       if (ctx->nthreads > 1U) {
         nullrows = la_block_lanczos_threaded(nrows, 0, ncols, columns,
@@ -6088,11 +6297,15 @@ static int siqs_solve(siqs_ctx_t *ctx) {
       if (timing_start != 0)
         ctx->result->solver_time += siqs_timing_elapsed(timing_start);
 #endif
-      if (nullrows != NULL) {
+#ifdef DMSIQS
+      siqs_report_host_peak_rss(ctx, "after Lanczos");
+#endif
+      if (report_solve)
+        siqs_test_and_log_solve(ctx, &report, journal_solve, columns, ncols, nullrows, mask, NULL);
+      else if (nullrows != NULL)
         siqs_test_dependencies(ctx, columns, ncols, nullrows, mask);
-        free(nullrows);
-        nullrows = NULL;
-      }
+      free(nullrows);
+      nullrows = NULL;
     }
   }
 solve_cleanup:
@@ -6124,10 +6337,6 @@ static void siqs_solve_final_batch(siqs_ctx_t *ctx) {
     return;
   }
   ctx->matrix_last_count = siqs_relation_count(ctx);
-  if (ctx->verbose > 0) {
-    printf("# siqs linear algebra with %u relations\n", siqs_relation_count(ctx));
-    fflush(stdout);
-  }
   (void)siqs_solve(ctx);
 }
 
@@ -6177,39 +6386,56 @@ static void siqs_progress_snapshot(siqs_ctx_t *ctx, uint64_t poly_count) {
   s->two_lp = ctx->accepted_two_lp;
   s->three_lp = ctx->accepted_three_lp;
   s->polynomials = poly_count;
-  s->pending = siqs_tlp_pending_count(ctx);
+  s->at = siqs_log_now();
 }
 
-static int siqs_progress_changed(const siqs_ctx_t *ctx, uint64_t poly_count) {
-  const siqs_progress_snapshot_t *s = &ctx->progress_last;
-  return s->full != siqs_relation_count(ctx) ||
-         s->smooth != ctx->accepted_smooth || s->one_lp != ctx->accepted_one_lp ||
-         s->two_lp != ctx->accepted_two_lp || s->three_lp != ctx->accepted_three_lp ||
-         s->polynomials != poly_count ||
-         s->pending != siqs_tlp_pending_count(ctx);
+static int siqs_progress_due(const siqs_ctx_t *ctx, uint64_t poly_count,
+                             uint64_t diagnostic_step, unsigned interval) {
+  return ctx->verbose > 1 &&
+    ((ctx->verbose > 2 && diagnostic_step != 0 &&
+      poly_count - ctx->progress_last.polynomials >= diagnostic_step) ||
+     siqs_log_now() - ctx->progress_last.at >= interval);
+}
+
+static uint64_t siqs_accepted_originals(const siqs_ctx_t *ctx) {
+  return ctx->accepted_smooth + ctx->accepted_one_lp +
+         ctx->accepted_two_lp + ctx->accepted_three_lp;
+}
+
+static const char *siqs_polynomial_label(const siqs_ctx_t *ctx) {
+#ifdef DMSIQS
+  if (ctx->distributed != NULL) return "accounted polys";
+#else
+  (void)ctx;
+#endif
+  return "polys";
 }
 
 static void siqs_print_relation_report(siqs_ctx_t *ctx, uint32_t target,
                                        uint64_t poly_count) {
-  char raw[24], polys[24];
-  siqs_format_progress_count(raw, ctx->accepted_smooth
-                                + ctx->accepted_one_lp
-                                + ctx->accepted_two_lp + ctx->accepted_three_lp);
+  const siqs_progress_snapshot_t *last = &ctx->progress_last;
+  uint64_t originals = siqs_accepted_originals(ctx);
+  uint64_t previous_originals = last->smooth + last->one_lp + last->two_lp + last->three_lp;
+  uint32_t full = siqs_relation_count(ctx);
+  double now = siqs_log_now(), interval = now - last->at;
+  char accepted[24], polys[24], elapsed[32];
+  siqs_format_progress_count(accepted, originals);
   siqs_format_progress_count(polys, poly_count);
-  if (ctx->lp_combiner != NULL) {
-    printf("# siqs relations %u/%u, raw %s, pending %zu, polys %s = %.0fxFB\n",
-           siqs_relation_count(ctx), target, raw,
-           siqs_tlp_pending_count(ctx), polys,
-           (double)poly_count / ctx->params.fb_size);
-  } else {
-    printf("# siqs relations %u/%u, raw %s, polys %s = %.0fxFB\n",
-           siqs_relation_count(ctx), target, raw, polys,
-           (double)poly_count / ctx->params.fb_size);
-  }
+  siqs_log_duration(elapsed, sizeof(elapsed), now - ctx->collection_started);
+  printf("# siqs relations %u/%u LP-free, %s originals, %s %s, %s elapsed",
+         full, target, accepted, polys, siqs_polynomial_label(ctx), elapsed);
+  if (interval > 0.0)
+    printf(", %.1f LP-free/s, %.1f originals/s, %.1f %s/s",
+           (full - last->full) / interval, (originals - previous_originals) / interval,
+           (poly_count - last->polynomials) / interval, siqs_polynomial_label(ctx));
+  if (ctx->verbose > 2 && ctx->tlp != NULL)
+    printf(", pending %zu", siqs_tlp_pending_count(ctx));
+  if (ctx->verbose > 2)
+    printf(", %.0fxFB", (double)poly_count / ctx->params.fb_size);
+  putchar('\n');
   if (ctx->verbose > 2) {
-    const siqs_progress_snapshot_t *last = &ctx->progress_last;
     printf("# siqs +rel %llu full, %llu 0LP, %llu 1LP, %llu 2LP, %llu 3LP; +%llu polys\n",
-           (unsigned long long)((uint64_t)siqs_relation_count(ctx) - last->full),
+           (unsigned long long)(full - last->full),
            (unsigned long long)(ctx->accepted_smooth - last->smooth),
            (unsigned long long)(ctx->accepted_one_lp - last->one_lp),
            (unsigned long long)(ctx->accepted_two_lp - last->two_lp),
@@ -6217,6 +6443,38 @@ static void siqs_print_relation_report(siqs_ctx_t *ctx, uint32_t target,
            (unsigned long long)(poly_count - last->polynomials));
   }
   siqs_progress_snapshot(ctx, poly_count);
+  fflush(stdout);
+}
+
+static void siqs_collection_begin(siqs_ctx_t *ctx, uint64_t poly_count) {
+  if (ctx->verbose <= 0) return;
+  siqs_progress_snapshot(ctx, poly_count);
+  ctx->collection_started = ctx->progress_last.at;
+  ctx->collection_start_originals = siqs_accepted_originals(ctx);
+  if (ctx->verbose > 1) puts("#");
+}
+
+static void siqs_collection_end(siqs_ctx_t *ctx, uint32_t target,
+                                const char *reason, int inline_solves) {
+  char elapsed[32];
+  double seconds;
+  uint64_t originals;
+  const char *phase = ctx->use_bids ? "collection with BIDS" :
+                      inline_solves ? "collection and inline solving" : "collection";
+  if (ctx->verbose <= 0) return;
+  seconds = siqs_log_now() - ctx->collection_started;
+  originals = siqs_accepted_originals(ctx);
+  siqs_log_duration(elapsed, sizeof(elapsed), seconds);
+  printf("# siqs %s %s (%s)", phase, elapsed, reason);
+  if (seconds > 0.0)
+    printf(", %.1f rels/s", (originals - ctx->collection_start_originals) / seconds);
+  if (ctx->verbose > 1) printf("\n# siqs relations ");
+  else printf(": ");
+  printf("%u/%u LP-free, %llu originals", siqs_relation_count(ctx), target,
+         (unsigned long long)originals);
+  if (ctx->verbose > 2 && ctx->tlp != NULL)
+    printf(", pending %zu", siqs_tlp_pending_count(ctx));
+  putchar('\n');
   fflush(stdout);
 }
 
@@ -6253,9 +6511,6 @@ static int siqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *poly,
   uint32_t check_interval = ctx->params.fb_size / 128;
   uint64_t max_polynomials = siqs_polynomial_limit(&ctx->params);
   uint64_t report_poly_step = siqs_progress_poly_step(ctx, 1U);
-  uint64_t next_work_report = *poly_count + report_poly_step;
-  uint32_t last_report_count = UINT32_MAX;
-  uint64_t last_report_polys = UINT64_MAX;
   if (check_interval < SIQS_MATRIX_CHECK_MIN)
     check_interval = SIQS_MATRIX_CHECK_MIN;
   if (check_interval > SIQS_MATRIX_CHECK_MAX)
@@ -6281,10 +6536,6 @@ static int siqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *poly,
     if (!family_ok) {
       if (verbose > 0)
         siqs_print_polynomial_notice(ctx, *poly_count);
-      if (verbose > 1 &&
-          (last_report_count != siqs_relation_count(ctx) ||
-           last_report_polys != *poly_count))
-        siqs_print_relation_report(ctx, target, *poly_count);
       return 0;
     }
     (*family_count)++;
@@ -6304,35 +6555,19 @@ static int siqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *poly,
         int ready = siqs_matrix_ready(ctx, &core_rows, &core_cols);
         if (ready && verbose > 0)
           siqs_print_polynomial_notice(ctx, *poly_count);
-        if (ready && verbose > 1 &&
-            (last_report_count != siqs_relation_count(ctx) ||
-             last_report_polys != *poly_count))
-          siqs_print_relation_report(ctx, target, *poly_count);
-        if ((ready && verbose > 1) || verbose > 2) {
-          siqs_print_matrix_progress(ctx, core_rows, core_cols, ready);
-        }
+        siqs_print_matrix_readiness(ctx, core_rows, core_cols, ready);
         *next_matrix_check = siqs_relation_count(ctx) + check_interval;
         if (ready) {
           return 1;
         }
       }
-      /* M times the polynomial count is a timer-free work clock.  Report at
-       * its approximate time cadence regardless of relation yield, so a slow
-       * tail still shows that collection is making progress. */
-      if (verbose > 1 && *poly_count >= next_work_report) {
+      if (siqs_progress_due(ctx, *poly_count, report_poly_step, SIQS_PROGRESS_SECONDS)) {
         siqs_print_polynomial_notice(ctx, *poly_count);
         siqs_print_relation_report(ctx, target, *poly_count);
-        last_report_count = siqs_relation_count(ctx);
-        last_report_polys = *poly_count;
-        next_work_report = *poly_count + report_poly_step;
       }
       if (*poly_count >= max_polynomials) {
         if (verbose > 0)
           siqs_print_polynomial_notice(ctx, *poly_count);
-        if (verbose > 1 &&
-            (last_report_count != siqs_relation_count(ctx) ||
-             last_report_polys != *poly_count))
-          siqs_print_relation_report(ctx, target, *poly_count);
         return 0;
       }
       if (siqs_relation_target_reached(ctx, target) || ctx->factor_found)
@@ -6346,10 +6581,6 @@ static int siqs_collect_relations(siqs_ctx_t *ctx, siqs_poly_t *poly,
   }
   if (verbose > 0)
     siqs_print_polynomial_notice(ctx, *poly_count);
-  if (verbose > 1 &&
-      (last_report_count != siqs_relation_count(ctx) ||
-       last_report_polys != *poly_count))
-    siqs_print_relation_report(ctx, target, *poly_count);
   return ctx->inline_matrix_solves
        ? ctx->factor_found
        : siqs_relation_target_reached(ctx, target) || ctx->factor_found;
@@ -6364,17 +6595,15 @@ static void siqs_collect_bids(siqs_ctx_t *ctx, siqs_poly_t *poly,
                                uint64_t *families, uint64_t *polynomials) {
   uint64_t max_polynomials = siqs_polynomial_limit(&ctx->params);
   uint64_t report_step = siqs_progress_poly_step(ctx, 1U);
-  uint64_t next_report = *polynomials + report_step;
   while (!ctx->factor_found && !ctx->bids_stop) {
     if (*polynomials >= max_polynomials || !siqs_new_family(ctx, poly)) break;
     (*families)++;
     for (;;) {
       siqs_sieve_polynomial(ctx, poly);
       (*polynomials)++;
-      if (ctx->verbose > 1 && *polynomials >= next_report) {
+      if (siqs_progress_due(ctx, *polynomials, report_step, SIQS_PROGRESS_SECONDS)) {
         siqs_print_polynomial_notice(ctx, *polynomials);
         siqs_print_relation_report(ctx, ctx->params.fb_size, *polynomials);
-        next_report = *polynomials + report_step;
       }
       if (ctx->factor_found || ctx->bids_stop || *polynomials >= max_polynomials)
         break;
@@ -6382,8 +6611,6 @@ static void siqs_collect_bids(siqs_ctx_t *ctx, siqs_poly_t *poly,
     }
   }
   if (ctx->verbose > 0) siqs_print_polynomial_notice(ctx, *polynomials);
-  if (ctx->verbose > 1)
-    siqs_print_relation_report(ctx, ctx->params.fb_size, *polynomials);
 }
 
 static void siqs_ctx_init(siqs_ctx_t *ctx, const mpz_t original,
@@ -6489,14 +6716,20 @@ static void siqs_workspace_allocate(siqs_ctx_t *ctx) {
     ctx->sieve_logp = (uint8_t *)siqs_malloc(ctx->params.fb_size);
     ctx->fb_reciprocal = (uint32_t *)siqs_malloc(
         siqs_array_size(ctx->params.fb_size, sizeof(uint32_t)));
-    siqs_set_log_weights(ctx);
+#ifdef DMSIQS
+    if (!ctx->distributed_worker)
+#endif
+      siqs_set_log_weights(ctx);
     for (i = 0; i < ctx->params.fb_size; i++) {
       ctx->prime[i] = ctx->fb[i].p;
       ctx->sieve_logp[i] = ctx->fb[i].logp;
       ctx->fb_reciprocal[i] =
           (uint32_t)(UINT64_C(0x100000000) / ctx->prime[i]);
     }
-    siqs_select_sieve_score_mode(ctx);
+#ifdef DMSIQS
+    if (!ctx->distributed_worker)
+#endif
+      siqs_select_sieve_score_mode(ctx);
   }
   ctx->fb_in_a = (uint8_t *)siqs_calloc(ctx->params.fb_size, 1U);
   ctx->root1 = (uint32_t *)siqs_malloc(
@@ -6559,10 +6792,15 @@ static int siqs_ctx_allocate(siqs_ctx_t *ctx) {
       ctx->params.max_large_primes >= 2)
     siqs_lp_combiner_init(ctx);
   if (ctx->params.max_large_primes == 3) {
-    siqs_tlp_init(ctx);
-#if SIQS_RESIDUAL_FIRST
-    siqs_rf_init(ctx);
+#ifdef DMSIQS
+    if (ctx->distributed == NULL)
 #endif
+    {
+      siqs_tlp_init(ctx);
+#if SIQS_RESIDUAL_FIRST
+      siqs_rf_init(ctx);
+#endif
+    }
   }
   else if (siqs_use_one_lp_relation_path(ctx))
     siqs_one_lp_init(&ctx->one_lp);
@@ -6662,6 +6900,7 @@ static int siqs_run(siqs_ctx_t *ctx) {
                              - ctx->params.fb_size / 4;
   int verbose = ctx->verbose;
   int threaded;
+  double run_started = verbose > 0 ? siqs_log_now() : 0;
   if (ctx->params.max_large_primes == 3) target_limit = UINT32_MAX - 1024U;
   if (retry_batch < 8)
     retry_batch = 8;
@@ -6687,6 +6926,11 @@ static int siqs_run(siqs_ctx_t *ctx) {
   siqs_poly_init(ctx, &poly);
 
   if (verbose > 0) {
+#ifdef DMSIQS
+    if (ctx->distributed != NULL)
+      printf("# dmsiqs remote collection, up to %u solver threads\n", (unsigned)ctx->nthreads);
+    else
+#endif
     if (ctx->nthreads > 1) {
       if (threaded)
         printf("# psiqs %u workers, asynchronous family collection\n",
@@ -6695,44 +6939,43 @@ static int siqs_run(siqs_ctx_t *ctx) {
         printf("# psiqs serial collection\n");
     }
     gmp_printf("# siqs trying %Zd (%u bits)\n", ctx->n, ctx->params.bits);
-    printf("# siqs policy %s [%u-%u], %u-LP\n",
-           ctx->params.policy_name, ctx->params.policy_first_bits,
-           ctx->params.policy_last_bits, ctx->params.max_large_primes);
-    if (ctx->params.fb_scale != 1.0 || ctx->params.lp_scale != 1.0 ||
-        ctx->params.r2_scale != 1.0)
-      printf("# siqs policy scales: FB x%.9g, K_L x%.9g, derived R2 x%.9g\n",
-          ctx->params.fb_scale, ctx->params.lp_scale, ctx->params.r2_scale);
-    printf("# siqs mult %lu, FB %u (pmax %u), M %u, q %u, d %u, "
-           "LP %llu, residual %llu, "
-           "pmin %u (init %u)\n",
-           ctx->multiplier, ctx->params.fb_size, ctx->largest_fb_prime,
-           ctx->params.half_interval, ctx->params.q_count,
-           ctx->params.poly_d,
+    printf("# siqs %u-LP, policy [%u-%u], q %u, FB %u, M %u\n",
+           ctx->params.max_large_primes,
+           ctx->params.policy_first_bits, ctx->params.policy_last_bits,
+           ctx->params.q_count, ctx->params.fb_size, ctx->params.half_interval);
+    printf("# siqs mult %lu, d %u, LP %llu, %s %llu, pmin %u, pmax %u\n",
+           ctx->multiplier, ctx->params.poly_d,
            (unsigned long long)ctx->params.large_prime_bound,
+           ctx->params.max_large_primes == 3 ? "R2" : "R",
            (unsigned long long)ctx->params.smooth_bound,
-           ctx->fb[ctx->params.sieve_start].p,
-           (unsigned)ctx->params.sieve_initial);
-    if (ctx->params.max_large_primes == 3) {
-      unsigned batch_capacity = (unsigned)SIQS_TLP_BATCH_SIZE;
-#if SIQS_RESIDUAL_FIRST
-      if (ctx->rf != NULL) batch_capacity = (unsigned)ctx->rf->lp_capacity;
+           ctx->fb[ctx->params.sieve_start].p, ctx->largest_fb_prime);
+    if (ctx->params.max_large_primes == 3)
+      gmp_printf("# siqs 3LP R3 %Zd, prime cutoff %u\n",
+                 ctx->tlp_upper, ctx->params.tlp_cutoff);
+    if (ctx->block_prime_count != 0
+#ifdef DMSIQS
+        && ctx->distributed == NULL
 #endif
-      gmp_printf("# siqs 3LP R3 %Zd, prime cutoff %u, batch %u (shared once per job)\n",
-          ctx->tlp_upper, ctx->params.tlp_cutoff, batch_capacity);
-    }
-#if SIQS_RESIDUAL_FIRST
-    if (ctx->rf != NULL) {
-      printf("# siqs residual-first: exact FB screening, recover accepted rows; jobs %u (initial %u)\n",
-          ctx->rf->job_limit, ctx->rf->job_count);
-      printf("# siqs residual batches FB %zu, LP %zu\n",
-          ctx->rf->fb_capacity, ctx->rf->lp_capacity);
-    }
-#endif
-    if (ctx->tlp_policy != NULL)
-      printf("# siqs 3LP policy: guarded 2LP on, exact gap on, early admission off\n");
-    if (ctx->block_prime_count != 0)
+        )
       printf("# siqs block sieve %u bytes (max %u)\n",
              ctx->block_length, (unsigned)SIQS_SIEVE_BLOCK_SIZE);
+    if (verbose > 2) {
+      printf("# siqs policy %s, sieve init %u\n",
+             ctx->params.policy_name, (unsigned)ctx->params.sieve_initial);
+      if (ctx->params.fb_scale != 1.0 || ctx->params.lp_scale != 1.0 ||
+        ctx->params.r2_scale != 1.0)
+        printf("# siqs policy scales: FB x%.9g, K_L x%.9g, derived R2 x%.9g\n",
+               ctx->params.fb_scale, ctx->params.lp_scale, ctx->params.r2_scale);
+    }
+    if (verbose > 2 && ctx->tlp != NULL) {
+#if SIQS_RESIDUAL_FIRST
+      if (ctx->rf != NULL)
+        printf("# siqs 3LP batch sizes: FB %zu, LP %zu, %u initial job slots (max %u)\n",
+               ctx->rf->fb_capacity, ctx->rf->lp_capacity, ctx->rf->job_count, ctx->rf->job_limit);
+      else
+#endif
+        printf("# siqs 3LP batch size %zu\n", ctx->tlp->capacity);
+    }
     if (ctx->params.bits > 400U)
       printf("# siqs over 400 bits: polynomial guard %uxFB => %.1fMxFB (max allowed).\n",
              SIQS_MAX_POLYNOMIALS_PER_FB,
@@ -6743,9 +6986,6 @@ static int siqs_run(siqs_ctx_t *ctx) {
   if (sj_attach(ctx, &poly, &family_count, &poly_count))
     goto journal_cleanup;
   sj_begin_attempt(ctx);
-  /* A resumed process reports deltas from its restored checkpoint, excluding
-   * accepted records that were only replayed during this invocation. */
-  siqs_progress_snapshot(ctx, poly_count);
   /* A replay can already contain an entire inline matrix batch. Unlike live
    * candidate evaluation, replay has not run that inline solve yet. */
   if (ctx->journal != NULL && !ctx->use_bids && ctx->inline_matrix_solves &&
@@ -6756,6 +6996,7 @@ static int siqs_run(siqs_ctx_t *ctx) {
   }
 
   if (ctx->use_bids) {
+    siqs_collection_begin(ctx, poly_count);
 #ifdef PSIQS
     if (threaded)
       (void)psiqs_collect_relations(ctx, &poly, ctx->params.fb_size,
@@ -6763,17 +7004,32 @@ static int siqs_run(siqs_ctx_t *ctx) {
     else
 #endif
       siqs_collect_bids(ctx, &poly, &family_count, &poly_count);
+    siqs_collection_end(ctx, ctx->params.fb_size,
+                        ctx->factor_found ? "split found" :
+                        ctx->bids_stop == SIQS_BIDS_BUDGET ? "relation budget reached" :
+                        ctx->bids_stop == SIQS_BIDS_UNCERTIFIED ? "uncertified state" :
+                        "source or work limit reached", 1);
     /* Exhaustion, the relation budget, or an uncertified BIDS state ends
      * this attempt. Retain useful factors; do not re-solve this matrix. */
   } else if (ctx->inline_matrix_solves) {
+    siqs_collection_begin(ctx, poly_count);
     (void)siqs_collect_relations(ctx, &poly, target, &next_matrix_check,
                                  &family_count, &poly_count);
+    siqs_collection_end(ctx, ctx->matrix_next_target,
+                        ctx->factor_found ? "split found" : "collection ended", 1);
   } else {
     while (!ctx->factor_found && target <= target_limit) {
       int collected;
 #ifdef SIQS_TIMING
       uint64_t collector_cpu_start = ctx->params.bits >= SIQS_TIMING_MIN_BITS
                                   ? siqs_timing_cpu_now() : 0;
+#endif
+      siqs_collection_begin(ctx, poly_count);
+#ifdef DMSIQS
+      if (ctx->distributed != NULL)
+        collected = ds_collect_relations(
+            ctx, &poly, target, &next_matrix_check, &family_count, &poly_count);
+      else
 #endif
 #ifdef PSIQS
       if (threaded)
@@ -6783,6 +7039,12 @@ static int siqs_run(siqs_ctx_t *ctx) {
 #endif
         collected = siqs_collect_relations(
             ctx, &poly, target, &next_matrix_check, &family_count, &poly_count);
+      siqs_collection_end(ctx, target,
+                          ctx->factor_found ? "split found" :
+                          siqs_relation_target_reached(ctx, target) ? "target reached" :
+                          collected ? "matrix ready" :
+                          poly_count >= siqs_polynomial_limit(&ctx->params) ? "work limit reached" :
+                          "collection ended", 0);
 #ifdef SIQS_TIMING
       if (collector_cpu_start)
         ctx->result->profile.collector_cpu_us += siqs_timing_cpu_now() - collector_cpu_start;
@@ -6796,10 +7058,6 @@ static int siqs_run(siqs_ctx_t *ctx) {
        * least one newly completed combination. */
       if (siqs_relation_count(ctx) <= ctx->matrix_last_count)
         break;
-      if (verbose > 0) {
-        printf("# siqs linear algebra with %u relations\n", siqs_relation_count(ctx));
-        fflush(stdout);
-      }
       ctx->matrix_last_count = siqs_relation_count(ctx);
       if (siqs_solve(ctx))
         break;
@@ -6808,9 +7066,11 @@ static int siqs_run(siqs_ctx_t *ctx) {
        * new work. */
       target = siqs_relation_count(ctx) + retry_batch;
       next_matrix_check = target;
+      if (verbose > 0 && target <= target_limit)
+        printf("# siqs collecting more relations for a retry (target %u)\n", target);
     }
   }
-  if (ctx->use_bids && ctx->verbose > 0) {
+  if (ctx->use_bids && ctx->verbose > 2) {
     const siqs_bids_t *s = ctx->bids;
     const char *reason = ctx->factor_found ? "complete"
         : ctx->bids_stop == SIQS_BIDS_BUDGET ? "relation budget exhausted"
@@ -6846,40 +7106,53 @@ static int siqs_run(siqs_ctx_t *ctx) {
   }
   siqs_tlp_flush(ctx);
   siqs_solve_final_batch(ctx);
-  if (verbose > 1 && siqs_progress_changed(ctx, poly_count))
-    siqs_print_relation_report(ctx, target, poly_count);
-  if (verbose > 0)
-    printf("# siqs used %llu families, %llu polynomials, %llu candidates, "
-           "%u full relations\n",
-           (unsigned long long)family_count, (unsigned long long)poly_count,
-           (unsigned long long)ctx->total_candidates, siqs_relation_count(ctx));
-  if (verbose > 0)
-    printf("# siqs accepted %llu smooth, %llu one-LP, %llu two-LP\n",
+  if (verbose > 0) {
+#ifdef DMSIQS
+    if (ctx->distributed != NULL)
+      printf("# dmsiqs %llu %s, %llu accounted polynomials, %u LP-free relations\n",
+             (unsigned long long)family_count,
+             ctx->journal != NULL ? "families selected" : "families with confirmed work",
+             (unsigned long long)poly_count, siqs_relation_count(ctx));
+    else
+#endif
+      printf("# siqs used %llu families, %llu polynomials, %llu candidates, "
+             "%u LP-free relations\n",
+             (unsigned long long)family_count, (unsigned long long)poly_count,
+             (unsigned long long)ctx->total_candidates, siqs_relation_count(ctx));
+    printf("# siqs accepted %llu smooth, %llu one-LP",
            (unsigned long long)ctx->accepted_smooth,
-           (unsigned long long)ctx->accepted_one_lp,
-           (unsigned long long)ctx->accepted_two_lp);
-  if (verbose > 0 && ctx->split_attempts != 0) {
-    printf("# siqs split %llu:", (unsigned long long)ctx->split_attempts);
-    if (ctx->split_square != 0)
-      printf(" %llu square,", (unsigned long long)ctx->split_square);
-    if (ctx->split_siqs != 0)
-      printf(" %llu SIQS,", (unsigned long long)ctx->split_siqs);
-    if (ctx->split_squfof != 0)
-      printf(" %llu SQUFOF,", (unsigned long long)ctx->split_squfof);
-    if (ctx->split_ecm != 0)
-      printf(" %llu ECM,", (unsigned long long)ctx->split_ecm);
-    if (ctx->split_fail != 0)
-      printf(" %llu failed,", (unsigned long long)ctx->split_fail);
-    printf(" %llu rejected\n", (unsigned long long)ctx->split_rejected);
+           (unsigned long long)ctx->accepted_one_lp);
+    if (ctx->params.max_large_primes >= 2)
+      printf(", %llu two-LP", (unsigned long long)ctx->accepted_two_lp);
+    if (ctx->params.max_large_primes == 3)
+      printf(", %llu three-LP", (unsigned long long)ctx->accepted_three_lp);
+    putchar('\n');
   }
-  if (verbose > 0 && ctx->params.max_large_primes == 3) {
-    printf("# siqs 3LP: %llu triples, %llu queued, %llu batches; GCD one/proper/whole %llu/%llu/%llu; complete/reject %llu/%llu; %u LP labels\n",
-        (unsigned long long)ctx->accepted_three_lp, (unsigned long long)ctx->tlp_candidates,
-        (unsigned long long)ctx->tlp_batches, (unsigned long long)ctx->tlp_gcd_one,
+  if (verbose > 0 && ctx->split_attempts != 0) {
+    printf("# siqs %scofactor splits: %llu tried",
+           ctx->params.max_large_primes == 3 ? "R2 " : "",
+           (unsigned long long)ctx->split_attempts);
+    if (ctx->split_square != 0)
+      printf(", %llu usable squares", (unsigned long long)ctx->split_square);
+    if (ctx->split_siqs != 0)
+      printf(", %llu usable via SIQS", (unsigned long long)ctx->split_siqs);
+    if (ctx->split_squfof != 0)
+      printf(", %llu usable via SQUFOF", (unsigned long long)ctx->split_squfof);
+    if (ctx->split_ecm != 0)
+      printf(", %llu usable via ECM", (unsigned long long)ctx->split_ecm);
+    printf(", %llu unsplit, %llu rejected splits\n",
+           (unsigned long long)ctx->split_fail, (unsigned long long)ctx->split_rejected);
+  }
+  if (verbose > 1 && ctx->lp_combiner != NULL)
+    printf("# siqs LP combination rank %u across %u labels\n",
+           ctx->lp_combiner->rank, ctx->lp_combiner->label_count);
+  if (verbose > 2 && ctx->tlp != NULL) {
+    printf("# siqs 3LP batches: %llu queued, %llu batches; GCD one/proper/whole %llu/%llu/%llu; complete/reject %llu/%llu\n",
+        (unsigned long long)ctx->tlp_candidates, (unsigned long long)ctx->tlp_batches,
+        (unsigned long long)ctx->tlp_gcd_one,
         (unsigned long long)ctx->tlp_gcd_proper, (unsigned long long)ctx->tlp_gcd_whole,
-        (unsigned long long)ctx->tlp_completed, (unsigned long long)ctx->tlp_rejected,
-        ctx->lp_combiner->label_count);
-    printf("# siqs 3LP cofactor work (this invocation): R2 attempts/resolved/rejected/fallback %llu/%llu/%llu/%llu; exact gap %llu, early admission 0 rejected\n",
+        (unsigned long long)ctx->tlp_completed, (unsigned long long)ctx->tlp_rejected);
+    printf("# siqs 3LP cofactor work (this invocation): R2 attempts/resolved/rejected/fallback %llu/%llu/%llu/%llu; exact gap rejected %llu\n",
         (unsigned long long)ctx->tlp_r2_attempts,
         (unsigned long long)ctx->tlp_r2_resolved,
         (unsigned long long)ctx->tlp_r2_rejected,
@@ -6887,7 +7160,7 @@ static int siqs_run(siqs_ctx_t *ctx) {
         (unsigned long long)ctx->tlp_gap_rejected);
   }
 #if SIQS_RESIDUAL_FIRST
-  if (verbose > 0 && ctx->rf != NULL)
+  if (verbose > 2 && ctx->rf != NULL)
     printf("# siqs residual-first: %llu norms, %llu jobs (%llu short), %llu recovered rows; peak active %u/%u, allocated %u slots\n",
         (unsigned long long)ctx->rf->inputs_done,
         (unsigned long long)ctx->rf->jobs_done,
@@ -6895,8 +7168,19 @@ static int siqs_run(siqs_ctx_t *ctx) {
         (unsigned long long)ctx->rf->recovered,
         siqs_rf_read_counter(ctx->rf, &ctx->rf->peak_active_jobs), ctx->rf->job_limit, ctx->rf->job_count);
 #endif
-  sj_end_attempt(ctx);
+#ifdef DMSIQS
+  if (ctx->distributed != NULL && ctx->factor_found) ctx->distributed->failed = 0;
+  if (ctx->distributed != NULL && ctx->distributed->failed)
+    sj_flush(ctx);
+  else
+#endif
+    sj_end_attempt(ctx);
 journal_cleanup:
+  if (verbose > 0) {
+    char elapsed[32];
+    siqs_log_duration(elapsed, sizeof(elapsed), siqs_log_now() - run_started);
+    printf("# siqs wall time %s\n", elapsed);
+  }
   siqs_poly_clear(ctx, &poly);
   return ctx->factor_found;
 }
@@ -6914,6 +7198,10 @@ static int siqs_try_policy(const mpz_t original, const mpz_t n,
 
   siqs_ctx_init(&ctx, original, n, result, profile, verbose);
   ctx.nthreads = nthreads;
+#ifdef DMSIQS
+  if (ctx.params.bits >= DMSIQS_MIN_BITS && ctx.params.max_large_primes >= 2)
+    ctx.distributed = result->distributed;
+#endif
   /* If the selected square-free multiplier completes a square, extract its
    * factor directly. A zero polynomial value lies outside the nonzero-norm
    * assumptions used to certify byte scores. */
@@ -6925,6 +7213,9 @@ static int siqs_try_policy(const mpz_t original, const mpz_t n,
   }
   if (!factor_found)
     factor_found = siqs_run(&ctx);
+#ifdef DMSIQS
+  if (ctx.distributed != NULL) ds_host_end_attempt(ctx.distributed);
+#endif
   siqs_ctx_clear(&ctx);
   siqs_verify_partition(original, result);
   return factor_found;
@@ -6937,7 +7228,7 @@ static int siqs_try_policy(const mpz_t original, const mpz_t n,
 static mpz_t *siqs_factor_with_journal(const mpz_t n, uint32_t *nfactors,
                            uint32_t trial_start, int verbose,
                            uint32_t nthreads, siqs_journal_t *journal,
-                           uint32_t options) {
+                           uint32_t options, void *distributed) {
   siqs_factor_array_t result;
   const siqs_policy_band_t *profile;
   mpz_t work, divisor, root;
@@ -6965,11 +7256,22 @@ static mpz_t *siqs_factor_with_journal(const mpz_t n, uint32_t *nfactors,
       (SIQS_OPTION_3LP | SIQS_OPTION_2LP))
     croak("SIQS: conflicting large-prime policy options");
   if (journal != NULL) {
+    if (verbose > 0 && !journal->announced) {
+      printf("# siqs %s journal %s\n", journal->read_only ? "reading" :
+             journal->reading ? "resuming" : "creating", journal->path);
+      fflush(stdout);
+      journal->announced = 1;
+    }
     mpz_t *cached = sj_cached_call(journal, n, nfactors);
     if (cached != NULL) return cached;
   }
   siqs_factor_array_init(&result, n);
   result.journal = journal;
+#ifdef DMSIQS
+  result.distributed = distributed;
+#else
+  (void)distributed;
+#endif
   if (mpz_cmp_ui(n, 1) <= 0) {
     sj_finish_call(journal, n, result.values, result.count);
     return siqs_factor_array_release(&result, nfactors);
@@ -7028,7 +7330,11 @@ static mpz_t *siqs_factor_with_journal(const mpz_t n, uint32_t *nfactors,
   profile = siqs_initial_policy_band(bits, options);
   factor_found = siqs_try_policy(
       n, work, &result, profile, divisor, root, verbose, nthreads);
-  while (!factor_found && (profile = siqs_next_policy(bits, &next)) != NULL)
+  while (!factor_found &&
+#ifdef DMSIQS
+         (result.distributed == NULL || !result.distributed->failed) &&
+#endif
+         (profile = siqs_next_policy(bits, &next)) != NULL)
     factor_found = siqs_try_policy(
         n, work, &result, profile, divisor, root, verbose, nthreads);
   siqs_verify_partition(n, &result);
@@ -7102,7 +7408,10 @@ static mpz_t *siqs_factor_with_journal(const mpz_t n, uint32_t *nfactors,
 #endif
 
 finish:
-  sj_finish_call(journal, n, result.values, result.count);
+#ifdef DMSIQS
+  if (result.distributed == NULL || !result.distributed->failed)
+#endif
+    sj_finish_call(journal, n, result.values, result.count);
   mpz_clear(work);
   mpz_clear(divisor);
   mpz_clear(root);
@@ -7112,7 +7421,7 @@ finish:
 mpz_t *gmp_siqs(const mpz_t n, uint32_t *nfactors, uint32_t trial_start,
                 int verbose, uint32_t nthreads, uint32_t flags) {
   return siqs_factor_with_journal(n, nfactors, trial_start, verbose,
-                                 nthreads, NULL, flags);
+                                 nthreads, NULL, flags, NULL);
 }
 
 mpz_t *gmp_siqs_journal_factor(siqs_journal_t *journal, const mpz_t n,
@@ -7121,9 +7430,13 @@ mpz_t *gmp_siqs_journal_factor(siqs_journal_t *journal, const mpz_t n,
   if (journal != NULL && (mpz_sgn(n) <= 0 || !mpz_divisible_p(journal->original, n)))
     croak("SIQS journal: requested cofactor does not divide original input");
   return siqs_factor_with_journal(n, nfactors, trial_start, verbose,
-                                 nthreads, journal, flags);
+                                 nthreads, journal, flags, NULL);
 }
 
 #ifdef PSIQS
 # include "psiqs_inc.c"
+#endif
+
+#ifdef DMSIQS
+# include "dmsiqs_core.inc.c"
 #endif

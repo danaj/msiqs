@@ -13,6 +13,13 @@ import time
 import zlib
 
 FRAME = struct.Struct('<IIQIIQQQII')
+SOLVE = struct.Struct('<7Q6I')
+COLLECTION = struct.Struct('<4Q')
+ACCOUNTING = struct.Struct('<8QI')
+ACCOUNTING_FIELDS = ('worker_user_us','worker_system_us','host_user_us','host_system_us',
+                     'peak_rss_bytes','jobs','timed_jobs','checkpointed_jobs')
+ACCOUNTING_HOST_CPU, ACCOUNTING_FINAL = 1, 2
+SOLVE_METHODS = {1: 'dense', 2: 'Lanczos', 3: 'Lanczos (all rows)'}
 PREAMBLE = b'MPUSIQJ\0'+struct.pack('<II',2,0x01020304)
 MAX_FRAME = 64*1024*1024
 RELATION_NAMES = ('smooth','one_lp','two_lp','three_lp','four_lp')
@@ -180,6 +187,9 @@ class Journal:
         self.previous_clock=None
         self.last_type=None
         self.returned=[]
+        self.solves=[]
+        self.collections=[]
+        self.accounting_snapshots={}
         self.job_end=None
         self.bytes=Counter()
         self.read_prefix()
@@ -351,8 +361,56 @@ class Journal:
         require(all(v>=2 or (n==1 and v==1) for v in values) and math.prod(values)==n,'invalid multiplicative partition')
         return dict(n=str(n),factors=[str(v) for v in values])
 
+    def solve(self, count, payload, run):
+        require(self.active is not None and not self.active['ended'],'SOLVE outside active context')
+        require(count==1 and len(payload)==SOLVE.size,'invalid SOLVE count or payload size')
+        (rows, columns, nonzeros, matrix_us, solver_us, dependency_us, iterations, method,
+         threads, attempts, returned, tested, found)=SOLVE.unpack(payload)
+        require(method in SOLVE_METHODS,'invalid SOLVE method')
+        require(threads>0 and (attempts==0 if method==1 else attempts>0),'invalid SOLVE threads or attempts')
+        require(tested<=returned<=64 and found in (0,1),'invalid SOLVE dependency counts or result')
+        self.solves.append(dict(context=self.active['id'],run=run,method=method,
+                                method_name=SOLVE_METHODS[method],rows=rows,columns=columns,
+                                nonzeros=nonzeros,matrix_us=matrix_us,solver_us=solver_us,
+                                dependency_us=dependency_us,iterations=iterations,threads=threads,
+                                attempts=attempts,dependencies_returned=returned,
+                                dependencies_tested=tested,factor_found=bool(found)))
+        self.bytes['solve_metadata']+=len(payload)
+
+    def collection(self, count, payload, run):
+        require(self.active is not None and not self.active['ended'],'COLLECTION outside active context')
+        require(count==1 and len(payload)==COLLECTION.size,'invalid COLLECTION count or payload size')
+        startup,collection,waiting,drain=COLLECTION.unpack(payload)
+        self.collections.append(dict(context=self.active['id'],run=run,startup_us=startup,
+                                     collection_us=collection,waiting_us=waiting,drain_us=drain))
+        self.bytes['collection_metadata']+=len(payload)
+
+    def read_accounting(self, count, payload, run):
+        require(count==1 and len(payload)==ACCOUNTING.size,'invalid ACCOUNTING count or payload size')
+        *values,flags=ACCOUNTING.unpack(payload)
+        require(not flags&~(ACCOUNTING_HOST_CPU|ACCOUNTING_FINAL),'invalid ACCOUNTING flags')
+        snapshot=dict(zip(ACCOUNTING_FIELDS,values))
+        require(flags&ACCOUNTING_HOST_CPU or not (snapshot['host_user_us'] or snapshot['host_system_us']),
+                'ACCOUNTING contains host times without host CPU flag')
+        require(snapshot['timed_jobs']+snapshot['checkpointed_jobs']<=snapshot['jobs'],
+                'invalid ACCOUNTING job counts')
+        require(flags&ACCOUNTING_FINAL or (self.last_type==3 and self.previous_clock[0]==run),
+                'ACCOUNTING checkpoint outside BATCH boundary')
+        snapshot['flags']=flags
+        self.accounting_snapshots[run]=snapshot
+        self.bytes['accounting_metadata']+=len(payload)
+
     def consume(self, kind, count, payload, run, elapsed, bad_clock):
         require(self.job_end is None,'frame after final job record')
+        if kind==7:
+            self.solve(count,payload,run)
+            return
+        if kind==8:
+            self.collection(count,payload,run)
+            return
+        if kind==9:
+            self.read_accounting(count,payload,run)
+            return
         r=Payload(payload)
         if kind==1:
             require(self.sequence==0 and count==1,'misplaced INPUT')
@@ -400,7 +458,7 @@ class Journal:
             magic,kind,seq,length,count,run,utc,elapsed,hcrc,crc=FRAME.unpack(header)
             if zlib.crc32(header[:48])!=hcrc:
                 self.file.seek(at);raise FrameChecksumError('frame header checksum mismatch at byte '+str(at))
-            require(magic==0x4b4c424a and seq==self.sequence and 1<=kind<=6,'invalid frame magic/type/sequence')
+            require(magic==0x4b4c424a and seq==self.sequence and 1<=kind<=9,'invalid frame magic/type/sequence')
             require(self.sequence!=0 or kind==1,'first frame must be INPUT')
             require(length<=MAX_FRAME,'frame exceeds size limit')
             payload=self.file.read(length)
@@ -415,7 +473,9 @@ class Journal:
             if not self.runs or run!=self.runs[-1]['id']:
                 self.runs.append(dict(id=run,frames=0,relations=0,first_utc_us=utc,last_utc_us=utc,elapsed_us=elapsed))
             bad_clock=False
-            if self.previous_clock:
+            # Phase timings do not participate in collection rate intervals.
+            timing_only=kind in (7,8,9)
+            if not timing_only and self.previous_clock:
                 prev_run,prev_utc,prev_elapsed=self.previous_clock
                 if utc<prev_utc:self.warn('UTC timestamp moved backwards (run '+str(run)+')')
                 if run==prev_run and elapsed<prev_elapsed:
@@ -424,11 +484,24 @@ class Journal:
                     if self.active is not None:self.active['samples'].clear()
             self.consume(kind,count,payload,run,elapsed,bad_clock)
             self.runs[-1]['frames']+=1;self.runs[-1]['last_utc_us']=utc;self.runs[-1]['elapsed_us']=elapsed
-            self.previous_clock=(run,utc,elapsed)
+            if not timing_only:self.previous_clock=(run,utc,elapsed)
             self.bytes['frame_headers']+=FRAME.size
             self.last_type=kind;self.sequence+=1;added+=1;self.committed=self.file.tell()
         require(self.sequence>0,'missing complete INPUT frame')
         return added
+
+    def accounting_summary(self):
+        snapshots=self.accounting_snapshots.values()
+        if not snapshots:
+            return None
+        totals={field:sum(snapshot[field] for snapshot in snapshots)
+                for field in ACCOUNTING_FIELDS if field!='peak_rss_bytes'}
+        total_runs,recorded=len(self.runs),len(snapshots)
+        final=sum(1 for snapshot in snapshots if snapshot['flags']&ACCOUNTING_FINAL)
+        host_cpu=sum(1 for snapshot in snapshots if snapshot['flags']&ACCOUNTING_HOST_CPU)
+        partial=recorded!=total_runs or final!=recorded or host_cpu!=recorded or totals['timed_jobs']!=totals['jobs']
+        return dict(totals,peak_rss_bytes=max(snapshot['peak_rss_bytes'] for snapshot in snapshots),
+                    runs=recorded,final_runs=final,host_cpu_runs=host_cpu,journal_runs=total_runs,partial=partial)
 
     def summary(self, window, eta_model='quadratic', eta_horizon=None):
         contexts=[]
@@ -461,7 +534,8 @@ class Journal:
                     byte_breakdown=dict(self.bytes),contexts=contexts,runs=runs,
                     relation_congruences_verified=self.verified,warnings=self.warnings,
                     warning_count=self.warning_count,last_frame_type=self.last_type,
-                    returned_partitions=self.returned,job_end=self.job_end)
+                    returned_partitions=self.returned,job_end=self.job_end,
+                    solves=self.solves,collections=self.collections,accounting=self.accounting_summary())
 
 
 def duration(seconds, rough=False):
@@ -501,6 +575,20 @@ def display(info, eta, window=300):
     if info['bytes_per_relation'] is not None:print(f"Whole-prefix bytes/relation: {info['bytes_per_relation']:.2f}")
     print('Checksums and structure: OK for the complete prefix')
     if info['relation_congruences_verified']:print(f"Verified congruences: {info['relation_congruences_verified']:,} OK")
+    accounting=info['accounting']
+    if accounting:
+        workers=(accounting['worker_user_us']+accounting['worker_system_us'])/3600000000
+        host=(accounting['host_user_us']+accounting['host_system_us'])/3600000000
+        host_text=f"{host:.6f} host core-hours" if accounting['host_cpu_runs'] else 'host CPU unavailable'
+        status='partial' if accounting['partial'] else 'complete'
+        print(f"CPU accounting ({status}) {workers:.6f} worker core-hours, {host_text}, "
+              f"{workers+host:.6f} total core-hours")
+        rss=accounting['peak_rss_bytes']
+        peak=f", peak host RSS {rss/(1<<20):.1f} MiB" if rss else ''
+        print(f"  Worker jobs {accounting['timed_jobs']}/{accounting['jobs']} final "
+              f"({accounting['checkpointed_jobs']} checkpoint-only), journal runs "
+              f"{accounting['runs']}/{accounting['journal_runs']} recorded "
+              f"({accounting['final_runs']} final, {accounting['host_cpu_runs']} with host CPU){peak}")
     for ctx in info['contexts']:
         p=ctx['parameters'];s=ctx['snapshot']
         print(f"Context {ctx['id']}: {ctx['bits']} bits, {ctx['policy']}, k={ctx['multiplier']}, FB={p['fb_size']:,} (pmax={ctx['pmax']}), M={p['half_interval']}, q={p['q_count']}, d={p['poly_d']}")
@@ -513,6 +601,17 @@ def display(info, eta, window=300):
             print(f"  Run {rate['run']} recent rates: {rate['raw_per_second']:.3f} raw/s, {rate['full_per_second']:.3f} full/s over {rate['window_seconds']:.1f}s")
         if eta and not ctx['ended']:
             print('  Collection ETA: '+collection_eta_text(ctx,window))
+    for collection in info['collections']:
+        print(f"Collection (context {collection['context']}, run {collection['run']}) "
+              f"startup {collection['startup_us']/1e6:.3f}s, collection {collection['collection_us']/1e6:.3f}s, "
+              f"waiting {collection['waiting_us']/1e6:.3f}s, drain {collection['drain_us']/1e6:.3f}s")
+    for solve in info['solves']:
+        print(f"Solve (context {solve['context']}, run {solve['run']}) {solve['method_name']}, "
+              f"{solve['rows']:,} x {solve['columns']:,}, {solve['nonzeros']:,} nonzeros, {solve['threads']} threads")
+        print(f"  Matrix {solve['matrix_us']/1e6:.3f}s, solver {solve['solver_us']/1e6:.3f}s, "
+              f"dependencies {solve['dependency_us']/1e6:.3f}s, {solve['iterations']:,} iterations, "
+              f"{solve['attempts']} attempts, {solve['dependencies_tested']}/{solve['dependencies_returned']} dependencies tested"
+              + (', factor found' if solve['factor_found'] else ''))
     for run in info['runs']:
         print(f"Run {run['id']}: {run['frames']:,} frames, {run['relations']:,} raw relations; {run['first_utc']} to {run['last_utc']}; elapsed {run['elapsed_us']/1e6:.3f}s")
     if info['tail']:print('Tail: '+info['tail']+'; validated prefix remains usable')
