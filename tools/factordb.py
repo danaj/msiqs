@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import socket
 import ssl
 from statistics import median
 import subprocess
@@ -25,6 +26,10 @@ import tempfile
 import threading
 import time
 from urllib.parse import urlsplit
+
+
+MAX_REPORT_BATCH_SIZE = 1000
+REPORT_POST_INTERVAL = 0.5
 
 
 class Error(Exception):
@@ -317,6 +322,7 @@ class Client:
         if self.url.scheme not in ('http', 'https') or not self.url.hostname or self.url.username:
             raise Error('api_url must be an HTTP or HTTPS endpoint')
         self.token, self.timeout = cfg['fdb_user_token'], cfg['http_timeout']
+        self.report_timeout = cfg['http_report_timeout']
         self.connection = None
         self.sequence = 0
 
@@ -329,7 +335,10 @@ class Client:
         self.sequence += 1
         return dict(jsonrpc='2.0', id=self.sequence, method=method, params=params)
 
-    def exchange(self, payload):
+    def exchange(self, payload, *, report=False):
+        operation = 'report' if report else 'download'
+        phase = f'connecting or sending the {operation} request'
+        timeout = self.timeout
         try:
             if self.connection is None:
                 cls = http.client.HTTPSConnection if self.url.scheme == 'https' else http.client.HTTPConnection
@@ -337,6 +346,8 @@ class Client:
                 if self.url.scheme == 'https':
                     kwargs['context'] = ssl.create_default_context()
                 self.connection = cls(self.url.hostname, self.url.port, **kwargs)
+            elif self.connection.sock is not None:
+                self.connection.sock.settimeout(self.timeout)
             path = self.url.path or '/'
             if self.url.query:
                 path += '?' + self.url.query
@@ -344,8 +355,12 @@ class Client:
                 'Content-Type': 'application/json', 'Accept': 'application/json',
                 'User-Agent': 'msiqs-factordb/1.0', 'X-Fdb-User-Token': self.token,
             })
-            response = self.connection.getresponse()
-            data = response.read()
+            phase = f'waiting for the {operation} response'
+            if report:
+                timeout = self.report_timeout
+                self.connection.sock.settimeout(timeout)
+            with self.connection.getresponse() as response:
+                data = response.read()
             if response.status != 200:
                 self.close()
                 cls = Retryable if response.status == 429 or response.status >= 500 else Error
@@ -353,6 +368,9 @@ class Client:
         except ssl.SSLCertVerificationError as exc:
             self.close()
             raise Error('FactorDB TLS certificate verification failed') from exc
+        except socket.timeout as exc:
+            self.close()
+            raise Retryable(f'FactorDB timed out after {timeout:g}s {phase}') from exc
         except (OSError, http.client.HTTPException) as exc:
             self.close()
             raise Retryable(f'FactorDB connection failed: {exc}') from exc
@@ -386,7 +404,7 @@ class Client:
 
     def submit(self, results):
         calls = [self.call('report_factors', dict(target={'expr': r['n']}, factors=r['factors'], credit=True)) for r in results]
-        self.exchange(calls)
+        self.exchange(calls, report=True)
 
 
 @contextmanager
@@ -508,28 +526,41 @@ class Worker:
 
     def submit(self):
         pending = self.state['pending']
-        if pending:
-            count = len(pending)
-            say(f'Submitting {count} factorizations '
-                f'({self.rpc_calls + count} RPC calls, {self.http_posts + 1} HTTP POSTs including this submission)')
-            start = time.monotonic()
-            previous_posts = self.http_posts
-            self.retry(self.client.submit, pending, rpc_calls=count)
-            elapsed = time.monotonic() - start
-            attempts = self.http_posts - previous_posts
-            acknowledged = {r['n'] for r in pending}
-            for n in (r['n'] for r in pending):
+        count = len(pending)
+        if count == 0:
+            return
+        batch_size = self.cfg['report_batch_size']
+        posts = (count + batch_size - 1) // batch_size
+        say(f'Submitting {count} factorizations '
+            f'({self.rpc_calls + count} RPC calls, {self.http_posts + posts} HTTP POSTs including this submission)')
+        start = next_post = time.monotonic()
+        previous_posts = self.http_posts
+        for offset in range(0, count, batch_size):
+            batch = pending[offset:offset + batch_size]
+            delay = next_post - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            next_post = time.monotonic() + REPORT_POST_INTERVAL
+            self.retry(self.client.submit, batch, rpc_calls=len(batch))
+            acknowledged = {r['n'] for r in batch}
+            for n in (r['n'] for r in batch):
                 if n not in self.reported:
                     self.state['reported'].append(n)
                     self.reported.add(n)
             self.state['reported'] = self.state['reported'][-self.cfg.get('reported_limit', 10000):]
             self.reported = set(self.state['reported'])
             self.state['queue'] = [n for n in self.state['queue'] if n not in acknowledged]
-            self.state['pending'] = []
+            self.state['pending'] = pending[offset + len(batch):]
             self.save()
-            retries = f' ({attempts} POST attempts)' if attempts > 1 else ''
-            say(f'Submitted {count} factorizations in {duration(elapsed)}{retries}')
-            self.rpc_calls = self.http_posts = 0
+        elapsed = time.monotonic() - start
+        attempts = self.http_posts - previous_posts
+        summary = ''
+        if attempts > posts:
+            summary = f' ({attempts} POST attempts)'
+        elif posts > 1:
+            summary = f' ({posts} HTTP POSTs)'
+        say(f'Submitted {count} factorizations in {duration(elapsed)}{summary}')
+        self.rpc_calls = self.http_posts = 0
 
     def factor_batch(self, executor, slots):
         # Only factoring runs in the pool. The caller owns state and RPCs.
@@ -615,7 +646,8 @@ def configuration(args):
     if args.config and not path.exists():
         raise Error(f'Configuration file does not exist: {path}')
     cfg = dict(api_url='https://factordb.com:4059/rpc', min_digits=90, max_digits=100,
-               threads=1, batch_size=10, batch_time=600, sleepseconds=300, short_download_delay=3,
+               threads=1, batch_size=10, report_batch_size=100, batch_time=600,
+               sleepseconds=300, short_download_delay=3,
                http_timeout=30, work_dir='factordb-work', fdb_user_token='', reported_limit=10000,
                method='msiqs', exec_msiqs='', exec_yafu='', exec_mpu='')
     if path.exists():
@@ -635,17 +667,23 @@ def configuration(args):
     cfg['fdb_user_token'] = os.environ.get('FDB_USER_TOKEN') or cfg['fdb_user_token']
     if not isinstance(cfg['fdb_user_token'], str) or not re.fullmatch(r'[0-9a-fA-F]{32}', cfg['fdb_user_token']):
         raise Error('Set fdb_user_token in the config or FDB_USER_TOKEN to your 32-character FactorDB token')
-    for key in ('min_digits', 'max_digits', 'threads', 'batch_size', 'reported_limit'):
+    for key in ('min_digits', 'max_digits', 'threads', 'batch_size', 'report_batch_size', 'reported_limit'):
         if type(cfg[key]) is not int:
             raise Error(f'{key} must be an integer')
-    if not 2 <= cfg['min_digits'] <= cfg['max_digits'] or not 1 <= cfg['threads'] <= 256 or not 1 <= cfg['batch_size'] <= 500:
-        raise Error('Invalid digit range, thread count (1-256), or batch size (1-500)')
+    if not 2 <= cfg['min_digits'] <= cfg['max_digits'] or not 1 <= cfg['threads'] <= 256 or not 1 <= cfg['batch_size'] <= 10000:
+        raise Error('Invalid digit range, thread count (1-256), or batch size (1-10000)')
+    if not 1 <= cfg['report_batch_size'] <= MAX_REPORT_BATCH_SIZE:
+        raise Error(f'report_batch_size must be between 1 and {MAX_REPORT_BATCH_SIZE}')
     if cfg['reported_limit'] < 1:
         raise Error('reported_limit must be at least one')
-    for key in ('batch_time', 'sleepseconds', 'http_timeout', 'short_download_delay'):
-        minimum = 1 if key in ('sleepseconds', 'http_timeout') else 0
-        if type(cfg[key]) not in (int, float) or not math.isfinite(cfg[key]) or cfg[key] < minimum:
+    for key, minimum in (('batch_time', 0), ('sleepseconds', 1), ('short_download_delay', 0),
+                         ('http_timeout', 1), ('http_report_timeout', 1)):
+        if key == 'http_report_timeout' and key not in cfg:
+            continue
+        value = cfg[key]
+        if type(value) not in (int, float) or not math.isfinite(value) or value < minimum:
             raise Error(f'Invalid {key}')
+    cfg.setdefault('http_report_timeout', max(180, cfg['http_timeout']))
     if cfg.get('sleep_during') or cfg.get('pause_while_running'):
         raise Error('sleep_during and pause_while_running are not supported by this worker; use its STOP file instead')
     cfg['work_dir'] = (path.parent / cfg['work_dir']).resolve()

@@ -6,12 +6,13 @@ import io
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 import factordb
@@ -113,7 +114,59 @@ class WorkerTest(unittest.TestCase):
                  params=dict(target={'expr': '77'}, factors=['7', '11'], credit=True)),
             dict(jsonrpc='2.0', id=2, method='report_factors',
                  params=dict(target={'expr': '169'}, factors=['13', '13'], credit=True)),
-        ])
+        ], report=True)
+
+    def test_report_read_timeout_is_scoped_to_the_response(self):
+        cfg = self.configuration(command='submit', api_url='http://example.invalid/rpc',
+                                 http_timeout=11, http_report_timeout=123)
+        client = factordb.Client(cfg)
+        self.addCleanup(client.close)
+        sock = Mock(timeout=11)
+        sock.settimeout.side_effect = lambda timeout: setattr(sock, 'timeout', timeout)
+        write_timeouts, read_timeouts = [], []
+        sock.sendall.side_effect = lambda _data: write_timeouts.append(sock.timeout)
+        replies = iter(((1, None), (2, {'numbers': ['91']})))
+
+        def response_file(*_args):
+            read_timeouts.append(sock.timeout)
+            sequence, result = next(replies)
+            body = json.dumps(dict(jsonrpc='2.0', id=sequence, result=result)).encode()
+            headers = f'HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\n\r\n'.encode()
+            return io.BytesIO(headers + body)
+
+        sock.makefile.side_effect = response_file
+        with patch('socket.create_connection', return_value=sock) as connect:
+            client.submit([{'n': '77', 'factors': FACTORS['77']}])
+            self.assertEqual(client.download(2, 1), ['91'])
+
+        connect.assert_called_once()
+        self.assertEqual(connect.call_args[0][1], 11)
+        self.assertEqual(set(write_timeouts), {11})
+        self.assertEqual(read_timeouts, [123, 11])
+
+    def test_report_read_timeout_closes_connection_before_retry(self):
+        client = factordb.Client(self.configuration(command='submit'))
+        self.addCleanup(client.close)
+        first, second = MagicMock(), MagicMock()
+        first_read = first.getresponse.return_value.__enter__.return_value
+        first_read.read.side_effect = socket.timeout('The read operation timed out')
+        second_read = second.getresponse.return_value.__enter__.return_value
+        second_read.status = 200
+        second_read.read.return_value = b'{"jsonrpc":"2.0","id":2,"result":null}'
+        results = [{'n': '77', 'factors': FACTORS['77']}]
+        with patch.object(factordb.http.client, 'HTTPSConnection', side_effect=[first, second]):
+            with self.assertRaisesRegex(factordb.Retryable, r'180s waiting for the report response'):
+                client.submit(results)
+            first.close.assert_called_once()
+            first.getresponse.return_value.__exit__.assert_called_once()
+            self.assertIsNone(client.connection)
+            client.submit(results)
+
+    def test_report_timeout_default_preserves_a_longer_existing_timeout(self):
+        cfg = self.configuration(command='submit', http_timeout=240)
+        self.assertEqual(cfg['http_report_timeout'], 240)
+        cfg = self.configuration(command='submit', http_timeout=240, http_report_timeout=120)
+        self.assertEqual(cfg['http_report_timeout'], 120)
 
     def test_serial_msiqs_does_not_pass_thread_option(self):
         slot = factordb.FactorSlot(self.configuration(threads=1))
@@ -232,6 +285,70 @@ class WorkerTest(unittest.TestCase):
         self.assertIn('(2 POST attempts)', self.output.getvalue())
         self.assertEqual(worker.state['pending'], [])
         self.assertEqual(worker.state['reported'], ['77'])
+
+    def test_submission_chunks_two_thousand_pending_results(self):
+        cfg = self.configuration(command='submit', batch_size=5000)
+        self.assertEqual(cfg['report_batch_size'], 100)
+        pending = [{'n': str(2 * n), 'factors': ['2', str(n)]} for n in range(1000, 3000)]
+        targets = [result['n'] for result in pending]
+        submitted = []
+
+        def submit(results):
+            offset = len(submitted)
+            saved = json.loads(worker.path.read_text())
+            self.assertEqual(saved['pending'], pending[offset:])
+            self.assertEqual(saved['reported'], targets[:offset])
+            self.assertEqual(saved['queue'], targets[offset:] + ['77'])
+            self.assertEqual(results, pending[offset:offset + 100])
+            submitted.extend(result['n'] for result in results)
+
+        worker = factordb.Worker(cfg, SimpleNamespace(submit=submit))
+        worker.state.update(queue=targets + ['77'], pending=pending.copy())
+        worker.save()
+        with patch.object(factordb.time, 'sleep'):
+            worker.submit()
+        self.assertEqual(submitted, targets)
+        saved = json.loads(worker.path.read_text())
+        self.assertEqual(saved['pending'], [])
+        self.assertEqual(saved['reported'], targets)
+        self.assertEqual(saved['queue'], ['77'])
+
+    def test_interrupted_submission_resumes_at_unacknowledged_chunk(self):
+        cfg = self.configuration(command='submit', report_batch_size=2)
+        pending = [dict(n=n, factors=factors) for n, factors in FACTORS.items()]
+        submit = Mock(side_effect=[None, factordb.Retryable('temporary failure'),
+                                   factordb.Retryable('temporary failure')])
+        worker = factordb.Worker(cfg, SimpleNamespace(submit=submit))
+        worker.state['pending'] = pending.copy()
+        worker.save()
+        with patch.object(factordb.time, 'sleep'), \
+             patch.object(worker, 'wait', side_effect=[None, factordb.Stopped()]), \
+             self.assertRaises(factordb.Stopped):
+            worker.submit()
+        self.assertEqual([call.args[0] for call in submit.call_args_list],
+                         [pending[:2], pending[2:4], pending[2:4]])
+        saved = json.loads(worker.path.read_text())
+        self.assertEqual(saved['pending'], pending[2:])
+        self.assertEqual(saved['reported'], [r['n'] for r in pending[:2]])
+
+        resumed_submit = Mock()
+        resumed = factordb.Worker(cfg, SimpleNamespace(submit=resumed_submit))
+        with patch.object(factordb.time, 'sleep'):
+            resumed.submit()
+        self.assertEqual([call.args[0] for call in resumed_submit.call_args_list],
+                         [pending[2:4], pending[4:]])
+        saved = json.loads(resumed.path.read_text())
+        self.assertEqual(saved['pending'], [])
+        self.assertEqual(saved['reported'], list(FACTORS))
+
+    def test_report_batch_size_has_independent_rpc_limit(self):
+        for value in (1, 1000):
+            with self.subTest(value=value):
+                cfg = self.configuration(command='submit', batch_size=5000, report_batch_size=value)
+                self.assertEqual(cfg['report_batch_size'], value)
+        for value in (0, 1001, 5.5, True):
+            with self.subTest(value=value), self.assertRaisesRegex(factordb.Error, 'report_batch_size'):
+                self.configuration(command='submit', report_batch_size=value)
 
     def test_factor_failure_keeps_input_and_saves_pending_results(self):
         client = SimpleNamespace(download=lambda digits, count: ['77', '99'] if digits == 2 else [],

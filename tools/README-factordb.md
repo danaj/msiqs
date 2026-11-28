@@ -77,5 +77,17 @@ touch factordb-work/STOP
 The work directory defaults to `factordb-work`. It stores queued inputs,
 pending factors, and recently acknowledged inputs in `state.json`. The worker
 checks the factor product and retains multiplicities before submission.
-Transient RPC failures retry after `sleepseconds`. A pending result stays
-saved until FactorDB acknowledges it.
+
+`batch_size` controls how much work to queue. `report_batch_size` limits
+the number of factorizations in each HTTP POST and defaults to 100, with
+an allowed range of 1–1,000. Reports are sent sequentially and each
+acknowledged batch is saved before the next. Transient RPC failures retry
+after `sleepseconds`. On restart, `submit` continues with the saved
+pending results.
+
+`http_timeout` defaults to 30 seconds and covers connection setup, request
+sends, and download replies. `http_report_timeout` covers reads of report
+replies and defaults to 180 seconds, or `http_timeout` if that is higher.
+Set `http_report_timeout` in the JSON config to give slow report batches
+more time. A read timeout closes the connection, and the next attempt
+uses a new one.
