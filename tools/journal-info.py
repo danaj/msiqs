@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only SIQS journal validation, inspection and live collection estimates."""
+"""Read-only SIQS journal summary, detailed inspection and live collection estimates."""
 import argparse
 from collections import Counter, deque
 from datetime import datetime, timedelta, timezone
@@ -145,14 +145,26 @@ class Payload:
         return int.from_bytes(raw,'big')
 
     def varint(self):
-        value=0
-        for shift in range(0,35,7):
-            byte=self.take(1)[0]
-            require(shift!=28 or byte<=15,'ULEB128 overflow')
-            value|=(byte&127)<<shift
-            if byte<128:
-                require(shift==0 or byte!=0,'noncanonical ULEB128')
-                return value
+        data, at = self.data, self.at
+        try:
+            byte = data[at]
+            if byte < 128:
+                self.at = at + 1
+                return byte
+            value = byte & 127
+            for shift in (7, 14, 21, 28):
+                at += 1
+                byte = data[at]
+                if shift == 28 and byte > 15:
+                    raise InvalidJournal('ULEB128 overflow')
+                value |= (byte & 127) << shift
+                if byte < 128:
+                    if byte == 0:
+                        raise InvalidJournal('noncanonical ULEB128')
+                    self.at = at + 1
+                    return value
+        except IndexError:
+            raise InvalidJournal('truncated payload field') from None
         raise InvalidJournal('unterminated ULEB128')
 
     def done(self):
@@ -168,11 +180,11 @@ def utc_text(value):
 
 
 class Journal:
-    def __init__(self, path, verify=False, eta_only=False):
+    def __init__(self, path, verify=False, detail=True):
         self.path=Path(path)
         self.file=self.path.open('rb')
         self.verify=verify
-        self.eta_only=eta_only
+        self.detail=detail or verify
         self.sequence=0
         self.contexts=[]
         self.active=None
@@ -284,7 +296,8 @@ class Journal:
             self.bytes['y_magnitude_and_length']+=r.at-start
             factors=r.u32()
             require(factors<=params['fb_size']+1 and factors<=len(r.data)-r.at,'invalid factor count')
-            start=r.at;row=0;rhs=math.prod(large_primes)%n
+            start=r.at;row=0
+            rhs=math.prod(large_primes)%n if self.verify else 0
             for i in range(factors):
                 code=r.varint();delta=code>>1
                 exponent=r.varint() if code&1 else 1
@@ -315,7 +328,7 @@ class Journal:
         require(count<=(len(r.data)-r.at)//2,'invalid batch event count')
         self.bytes['batch_snapshots']+=8*len(PROGRESS)
         before=ctx['raw_count']
-        if self.eta_only:
+        if not self.detail:
             # Version 2 batches contain only family and relation events. The
             # frame count and the snapshot's family delta give the raw count.
             new_families=snapshot['families']-ctx['families']
@@ -563,17 +576,26 @@ def collection_eta_text(ctx, window=300):
     return ('roughly ' if rough else '')+duration(seconds,rough)
 
 
-def display(info, eta, window=300):
+def display(info, eta, window=300, detail=True):
     print('Journal: '+info['path'])
     print('N: '+info['n'])
     print(f"{info['bits']} bits; {info['frames']:,} valid frames; writing runs: {len(info['runs'])}; {info['validated_bytes']:,}/{info['file_bytes']:,} validated bytes")
-    counts=info['relations']
-    breakdown=', '.join(f"{counts.get(name,0):,} {label}" for i,(name,label) in
-                       enumerate(zip(RELATION_NAMES,('smooth','1LP','2LP','3LP','4LP')))
-                       if i<=2 or counts.get(name,0))
-    print(f"Stored raw relations: {info['relation_count']:,} ({breakdown})")
+    raw=f"Stored raw relations: {info['relation_count']:,}"
+    if detail:
+        counts=info['relations']
+        breakdown=', '.join(f"{counts.get(name,0):,} {label}" for i,(name,label) in
+                           enumerate(zip(RELATION_NAMES,('smooth','1LP','2LP','3LP','4LP')))
+                           if i<=2 or counts.get(name,0))
+        raw+=f" ({breakdown})"
+    print(raw)
     if info['bytes_per_relation'] is not None:print(f"Whole-prefix bytes/relation: {info['bytes_per_relation']:.2f}")
-    print('Checksums and structure: OK for the complete prefix')
+    if detail:
+        print('Checksums and structure: OK for the complete prefix')
+        print('Storage bytes by field')
+        for name, size in info['byte_breakdown'].items():
+            if size:print(f"  {name.replace('_',' ')} {size:,}")
+    else:
+        print('Frame checksums and progress OK')
     if info['relation_congruences_verified']:print(f"Verified congruences: {info['relation_congruences_verified']:,} OK")
     accounting=info['accounting']
     if accounting:
@@ -614,11 +636,13 @@ def display(info, eta, window=300):
               + (', factor found' if solve['factor_found'] else ''))
     for run in info['runs']:
         print(f"Run {run['id']}: {run['frames']:,} frames, {run['relations']:,} raw relations; {run['first_utc']} to {run['last_utc']}; elapsed {run['elapsed_us']/1e6:.3f}s")
+    if info['job_end'] is not None and info['job_end']['complete']:
+        print('Factors: '+' '.join(info['job_end']['partition']['factors']))
     if info['tail']:print('Tail: '+info['tail']+'; validated prefix remains usable')
     for warning in info['warnings']:print('Warning: '+warning)
 
 
-def display_eta(info, previous, window=300, eta_only=False):
+def display_eta(info, previous, window=300, detail=True):
     ctx=info['contexts'][-1] if info['contexts'] else None
     snapshot=ctx['snapshot'] if ctx else None
     target=(snapshot['collection_target'] if snapshot else ctx['parameters']['target_relations']) if ctx else None
@@ -627,7 +651,7 @@ def display_eta(info, previous, window=300, eta_only=False):
         print('Journal: '+info['path'])
         print('N: '+info['n'])
         print(f"{info['bits']} bits; {info['frames']:,} valid frames; {info['validated_bytes']:,}/{info['file_bytes']:,} validated bytes; writing runs: {len(info['runs'])}")
-        checked='frame checksums and progress OK' if eta_only else 'checksums and structure OK'
+        checked='checksums and structure OK' if detail else 'frame checksums and progress OK'
         print(f"Stored raw relations: {info['relation_count']:,}; {checked}")
     if ctx and (previous is None or previous['context']!=context):
         p=ctx['parameters']
@@ -653,8 +677,11 @@ def display_eta(info, previous, window=300, eta_only=False):
 
 
 def main():
-    ap=argparse.ArgumentParser(description=__doc__)
+    ap=argparse.ArgumentParser(description=__doc__,
+        epilog='Text output checks frame checksums and progress by default. '
+               '--json, --strict and --verify-relations imply --detail.')
     ap.add_argument('journal',type=Path)
+    ap.add_argument('--detail',action='store_true',help='decode and validate all records and show detailed counts and storage use')
     ap.add_argument('--verify-relations',action='store_true',help='also check every relation congruence')
     ap.add_argument('--json',action='store_true',help='emit structured results; JSON lines in follow mode')
     ap.add_argument('--eta',action='store_true',help='show compact progress with a collection ETA')
@@ -671,10 +698,10 @@ def main():
         ap.error('window and interval must be positive finite values')
     if args.eta_horizon is not None and (not math.isfinite(args.eta_horizon) or args.eta_horizon<=0):
         ap.error('ETA horizon must be a positive finite value')
-    eta_only=args.eta and not (args.json or args.verify_relations or args.strict)
+    detail=args.detail or args.json or args.verify_relations or args.strict
     journal=None;retry=None;first=True;previous=None
     try:
-        journal=Journal(args.journal,args.verify_relations,eta_only=eta_only)
+        journal=Journal(args.journal,args.verify_relations,detail=detail)
         while True:
             try:
                 added=journal.scan();retry=None
@@ -686,8 +713,8 @@ def main():
                 info=journal.summary(args.window,args.eta_model,args.eta_horizon)
                 if args.json:print(json.dumps(info,sort_keys=True),flush=True)
                 else:
-                    if args.eta:previous=display_eta(info,previous,args.window,eta_only=eta_only)
-                    else:display(info,False,args.window)
+                    if args.eta:previous=display_eta(info,previous,args.window,detail=detail)
+                    else:display(info,False,args.window,detail=detail)
                     if info['job_end'] is not None:
                         print('Collection completed.' if info['job_end']['complete'] else 'Job ended without a complete factorization.')
                     sys.stdout.flush()

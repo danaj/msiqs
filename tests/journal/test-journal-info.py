@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Inspector checks using real journals, deliberate corruption and live writers."""
-import importlib.util,json,signal,struct,subprocess,sys,tempfile,time,zlib
+import importlib.util,json,re,signal,struct,subprocess,sys,tempfile,time,zlib
 from pathlib import Path
 sys.dont_write_bytecode=True
 from _support import ROOT, RESULTS, EXE, TOOL
@@ -12,8 +12,8 @@ def check(name):
  global passed
  passed+=1;print('PASS '+name,flush=True)
 
-def inspect(path,verify=False,eta_only=False):
- reader=info.Journal(path,verify,eta_only=eta_only)
+def inspect(path,verify=False,detail=True):
+ reader=info.Journal(path,verify,detail=detail)
  try:reader.scan();return reader.summary(300)
  finally:reader.close()
 
@@ -46,6 +46,18 @@ def metadata_frame(prefix,kind,payload,count=1,delay_us=0,next_run=False):
  changes={1:kind,2:fields[2]+1,4:count,5:fields[5]+int(next_run),6:fields[6]+delay_us,7:elapsed}
  return rewrite(prefix,previous,changes,payload)[previous[0]:]
 
+for encoded,value in ((b'\x00',0),(b'\x7f',127),(b'\x80\x01',128),
+                      (b'\xff\xff\xff\xff\x0f',0xffffffff)):
+ r=info.Payload(b'\x11'+encoded+b'\x22')
+ assert r.u8()==0x11 and r.varint()==value and r.u8()==0x22
+ r.done()
+for encoded,error in ((b'','truncated'),(b'\x80','truncated'),(b'\x80\x00','noncanonical'),
+                      (b'\x80\x80\x80\x80\x10','overflow')):
+ try:info.Payload(encoded).varint()
+ except info.InvalidJournal as failure:assert error in str(failure),failure
+ else:raise AssertionError(f'accepted malformed ULEB128 {encoded!r}')
+check('ULEB128 decodes canonical values and rejects truncation, noncanonical values and overflow')
+
 with tempfile.TemporaryDirectory(prefix='journal-info-',dir=RESULTS) as directory:
  tmp=Path(directory);path=tmp/'complete.journal'
  subprocess.run([str(EXE),'-t','1','--journal',str(path),str(ONE)],stdout=subprocess.DEVNULL,check=True)
@@ -62,17 +74,33 @@ with tempfile.TemporaryDirectory(prefix='journal-info-',dir=RESULTS) as director
  assert 'ETA:' not in text and text.rstrip().endswith('Collection completed.')
  assert result['job_end']['complete'] and result['job_end']['partition']['n']==str(ONE)
  check('JSON/text parameters, compact final counters and completion')
- assert f"Stored raw relations: {result['relation_count']:,}; frame checksums and progress OK" in text
+ raw_count=f"Stored raw relations: {result['relation_count']:,}"
+ assert raw_count+'; frame checksums and progress OK' in text
+ default=cli(path).stdout.splitlines()
+ assert raw_count in default and 'Frame checksums and progress OK' in default
+ assert 'Storage bytes by field' not in default
+ factors=next(line for line in default if line.startswith('Factors: '))
+ assert re.findall(r'[0-9]+',factors)==result['job_end']['partition']['factors']
+ assert default[-1]=='Collection completed.'
+ detail=cli(path,'--detail').stdout
+ assert raw_count+' (' in detail and 'Checksums and structure: OK for the complete prefix' in detail
+ assert 'Storage bytes by field' in detail.splitlines()
+ assert raw_count+'; checksums and structure OK' in cli(path,'--eta','--detail').stdout
+ check('default summary preserves exact raw count and final factors; detail retains relation breakdown')
  event_frame=next(frame for frame in batches if frame[2][4])
  start,end,_=event_frame;event_offset=info.FRAME.size+8*len(info.PROGRESS)
  altered=bytearray(data);altered[start+event_offset]=255
  bad=tmp/'bad-event.journal';bad.write_bytes(altered)
- assert 'frame checksum mismatch' in cli(bad,'--eta',ok=False).stderr
+ for args in ((),('--eta',)):
+  assert 'frame checksum mismatch' in cli(bad,*args,ok=False).stderr
  bad.write_bytes(rewrite(data,event_frame,payload=altered[start+info.FRAME.size:end]))
- assert 'Collection completed.' in cli(bad,'--eta').stdout
- for flag in ('--json','--strict','--verify-relations'):
-  assert 'unknown batch event' in cli(bad,'--eta',flag,ok=False).stderr
- check('compact ETA skips event decoding while retaining frame checksums')
+ for args in ((),('--eta',)):
+  text=cli(bad,*args).stdout
+  assert raw_count in text and 'Collection completed.' in text
+  for flag in ('--detail','--json','--strict','--verify-relations'):
+   assert 'unknown batch event' in cli(bad,*args,flag,ok=False).stderr
+ check('default and compact summaries skip events while detailed modes reject malformed events')
+ assert cli(path,'--follow','--interval','.01').stdout.splitlines()==default
  assert cli(path,'--follow','--eta','--interval','.01').stdout.rstrip().endswith('Collection completed.')
  assert json.loads(cli(path,'--follow','--json','--interval','.01').stdout)['job_end']['complete']
  check('text and JSON followers exit on the final job record')
@@ -175,7 +203,7 @@ with tempfile.TemporaryDirectory(prefix='journal-info-',dir=RESULTS) as director
  assert kind==1
  at+=labels*width;size=struct.unpack_from('<I',payload,at)[0];assert size>0
  payload[at+4+size-1]^=1
- bad=tmp/'congruence.journal';bad.write_bytes(rewrite(data,batches[0],payload=payload));cli(bad)
+ bad=tmp/'congruence.journal';bad.write_bytes(rewrite(data,batches[0],payload=payload));cli(bad,'--detail')
  assert 'congruence' in cli(bad,'--verify-relations',ok=False).stderr
  check('optional verification catches checksummed mathematical corruption')
  eta_data=data[:batches[8][1]]
@@ -185,7 +213,7 @@ with tempfile.TemporaryDirectory(prefix='journal-info-',dir=RESULTS) as director
  assert rate and rate['run']==0 and rate['full_per_second']>0
  remaining=max(0,ctx['snapshot']['collection_target']-ctx['snapshot']['full_relations'])
  assert abs(rate['collection_eta_seconds']-remaining/rate['full_per_second'])<1e-9
- fast=inspect(eta,eta_only=True)
+ fast=inspect(eta,detail=False)
  assert fast['relation_count']==inspect(eta)['relation_count']
  assert fast['contexts'][0]['rate']==rate and fast['contexts'][0]['snapshot']==ctx['snapshot']
  check('ETA uses same-run/context monotonic progress')
@@ -200,7 +228,7 @@ with tempfile.TemporaryDirectory(prefix='journal-info-',dir=RESULTS) as director
  assert report['byte_breakdown']['solve_metadata']==baseline['byte_breakdown'].get('solve_metadata',0)+len(payload)
  assert report['contexts']==baseline['contexts'] and report['relations']==baseline['relations']
  assert report['relation_congruences_verified']==baseline['relation_congruences_verified']
- assert inspect(solve,eta_only=True)['contexts'][0]['rate']==rate
+ assert inspect(solve,detail=False)['contexts'][0]['rate']==rate
  text=cli(solve).stdout
  assert 'Lanczos, 100 x 103, 250 nonzeros, 8 threads' in text and '9/32 dependencies tested' in text
  attempt_end=next(frame for frame in ff if frame[2][1]==4)
@@ -229,7 +257,7 @@ with tempfile.TemporaryDirectory(prefix='journal-info-',dir=RESULTS) as director
  assert report['byte_breakdown']['collection_metadata']==baseline['byte_breakdown'].get('collection_metadata',0)+len(payload)
  assert report['contexts']==baseline['contexts'] and report['relations']==baseline['relations']
  assert report['relation_congruences_verified']==baseline['relation_congruences_verified']
- assert inspect(collection,eta_only=True)['contexts'][0]['rate']==rate
+ assert inspect(collection,detail=False)['contexts'][0]['rate']==rate
  assert 'startup 1.250s, collection 302.500s, waiting 12.250s, drain 0.125s' in cli(collection).stdout
  prefix=data[:attempt_end[0]]
  collection.write_bytes(prefix+metadata_frame(prefix,8,payload)+tail)
@@ -267,7 +295,7 @@ with tempfile.TemporaryDirectory(prefix='journal-info-',dir=RESULTS) as director
  assert report['byte_breakdown']['accounting_metadata']==3*info.ACCOUNTING.size
  assert report['contexts']==baseline['contexts'] and report['relations']==baseline['relations']
  assert report['relation_congruences_verified']==baseline['relation_congruences_verified']
- assert inspect(accounting,eta_only=True)['contexts'][0]['rate']==rate
+ assert inspect(accounting,detail=False)['contexts'][0]['rate']==rate
  text=cli(accounting).stdout
  assert 'CPU accounting (complete) 1.250000 worker core-hours' in text and 'peak host RSS 72.0 MiB' in text
  assert baseline['accounting'] is None

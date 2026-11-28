@@ -18,6 +18,8 @@ From the repository root, create a journal and resume it with:
 ```sh
 ./msiqs -t 8 --journal job.journal 22095311209999409685885162322219
 ./msiqs -t 8 --journal job.journal
+python3 tools/journal-info.py job.journal
+python3 tools/journal-info.py --detail job.journal
 python3 tools/journal-info.py --verify-relations job.journal
 python3 tools/journal-info.py --follow --eta job.journal
 ```
@@ -526,17 +528,20 @@ fallback silently overwrites an incompatible journal.
 
 ## Read-only inspection and live writers
 
-`tools/journal-info.py` validates the complete prefix and summarizes contexts,
-runs, progress and byte use.  Its optional modular checks use the saved y and
-factor vectors directly.  Graph snapshots are checked for structural consistency
-but the Python tool does not reconstruct the graph. Measured raw/full rates
-use monotonic progress within one context/run; UTC anomalies only warn.
+By default, `tools/journal-info.py` checks frame checksums and batch progress
+snapshots, skipping the individual family and relation records. It summarizes
+contexts, runs, progress, timings, matrix statistics, CPU accounting, and
+final factors when recorded. Raw relation counts come from the batch event
+counts and the change in the family count. `--eta` selects a compact progress
+view, and either view can follow a live journal with `--follow`.
 
-Plain `--eta`, including with `--follow`, checks frame checksums and reads
-batch progress snapshots without decoding individual family and relation
-records. Raw relation counts come from the batch event counts and the
-change in the family count. Add `--json`, `--verify-relations` or
-`--strict` to use the full decoder.
+`--detail` decodes and checks every event record and shows per-LP counts and
+storage by field. `--json`, `--strict`, and `--verify-relations` also use the
+full decoder. `--strict` rejects an incomplete final frame.
+`--verify-relations` also checks congruences using the saved y and factor
+vectors. Graph snapshots are checked for structural consistency. Measured
+raw and full relation rates use monotonic progress within one context and
+run. UTC anomalies produce warnings.
 
 Collection ETA uses a local quadratic fit to completed full relations over
 the recent window (five minutes by default), anchored to the actual current
