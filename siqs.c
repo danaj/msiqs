@@ -191,7 +191,7 @@ static void siqs_timing_stage(uint64_t *start, uint64_t *total) {
  X(tlp_prime_us) X(tlp_prime_calls) X(tlp_square_us) X(tlp_square_calls) \
  X(tlp_ecm_us) X(tlp_ecm_calls) \
  X(tlp_siqs_us) X(tlp_siqs_calls) X(tlp_siqs_small_calls) \
- X(tlp_siqs_mid_calls) X(tlp_siqs_wide_calls) \
+ X(tlp_siqs_mid_calls) X(tlp_siqs_wide_calls) X(tlp_siqs_wide_us) \
  X(rf_setup_us) X(rf_job_us) X(rf_job_cpu_us) X(rf_jobs) \
  X(rf_screen_us) X(rf_strip_us) X(rf_recover_us) X(rf_inputs) X(rf_accepted) \
  X(rf_screen_cpu_us) X(rf_wait_us) X(rf_worker_jobs) X(rf_coord_jobs) \
@@ -7391,11 +7391,18 @@ static mpz_t *siqs_factor_with_journal(const mpz_t n, uint32_t *nfactors,
                  (unsigned long long)p->tlp_worker_gcd_jobs,
                  p->tlp_gcd_wait_us / 1e6);
         printf("# siqs profile completion: primality %.6f/%llu, square %.6f/%llu, "
-               "ECM %.6f/%llu, SIQS %.6f/%llu (seconds/calls)\n",
+               "ECM %.6f/%llu",
                p->tlp_prime_us / 1e6, (unsigned long long)p->tlp_prime_calls,
                p->tlp_square_us / 1e6, (unsigned long long)p->tlp_square_calls,
-               p->tlp_ecm_us / 1e6, (unsigned long long)p->tlp_ecm_calls,
-               p->tlp_siqs_us / 1e6, (unsigned long long)p->tlp_siqs_calls);
+               p->tlp_ecm_us / 1e6, (unsigned long long)p->tlp_ecm_calls);
+        if (verbose > 2)
+          printf(", SIQS <=64-bit %.6f/%llu, >64-bit %.6f/%llu (elapsed seconds/calls)\n",
+                 (p->tlp_siqs_us - p->tlp_siqs_wide_us) / 1e6,
+                 (unsigned long long)(p->tlp_siqs_small_calls + p->tlp_siqs_mid_calls),
+                 p->tlp_siqs_wide_us / 1e6, (unsigned long long)p->tlp_siqs_wide_calls);
+        else
+          printf(", SIQS %.6f/%llu (seconds/calls)\n",
+                 p->tlp_siqs_us / 1e6, (unsigned long long)p->tlp_siqs_calls);
       }
       printf("# siqs profile_json {");
 #define SIQS_PROFILE_PRINT(name) \

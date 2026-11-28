@@ -502,12 +502,9 @@ static int siqs_tlp_complete(siqs_ctx_t *ctx, const mpz_t n,
       mpz_t *parts;
       int good;
 #ifdef SIQS_TIMING
+      uint32_t bits = 0;
       if (timing_enabled) {
-        uint32_t bits = (uint32_t)mpz_sizeinbase(s->current, 2);
-        ++ctx->result->profile.tlp_siqs_calls;
-        if (bits < 56U) ++ctx->result->profile.tlp_siqs_small_calls;
-        else if (bits <= 64U) ++ctx->result->profile.tlp_siqs_mid_calls;
-        else ++ctx->result->profile.tlp_siqs_wide_calls;
+        bits = (uint32_t)mpz_sizeinbase(s->current, 2);
         timing_start = siqs_timing_now();
       }
 #endif
@@ -526,8 +523,18 @@ static int siqs_tlp_complete(siqs_ctx_t *ctx, const mpz_t n,
       gmp_siqs_free(parts, nf);
 #ifdef SIQS_TIMING
       /* Include the quiet solver's partition validation, copy, and release. */
-      if (timing_enabled)
-        ctx->result->profile.tlp_siqs_us += siqs_timing_elapsed(timing_start);
+      if (timing_enabled) {
+        uint64_t elapsed = siqs_timing_elapsed(timing_start);
+        siqs_profile_t *profile = &ctx->result->profile;
+        profile->tlp_siqs_us += elapsed;
+        ++profile->tlp_siqs_calls;
+        if (bits < 56U) ++profile->tlp_siqs_small_calls;
+        else if (bits <= 64U) ++profile->tlp_siqs_mid_calls;
+        else {
+          ++profile->tlp_siqs_wide_calls;
+          profile->tlp_siqs_wide_us += elapsed;
+        }
+      }
 #endif
       if (!good) return 0;
     }
